@@ -28,6 +28,11 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertIn('RUN_ARGS+=(--device "$SERIAL_DEVICE"', script)
         self.assertIn('RUN_ARGS+=(--device "$I2C_DEVICE")', script)
 
+    def test_run_script_passes_lichess_token_only_when_set(self) -> None:
+        script = (ROOT / "run.sh").read_text(encoding="utf-8")
+        self.assertIn("if [[ -n ${LICHESS_TOKEN:-} ]]", script)
+        self.assertIn('RUN_ARGS+=(--env "LICHESS_TOKEN=$LICHESS_TOKEN")', script)
+
     def test_python_entrypoint_runs_clerk_gated_ui_without_shell(self) -> None:
         entrypoint = (ROOT / "docker" / "bin" / "chess-gantry-docker").read_text(
             encoding="utf-8"

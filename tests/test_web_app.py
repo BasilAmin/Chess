@@ -19,6 +19,7 @@ from chess_gantry.persistence import atomic_write_json
 from chess_gantry.service import GantryService
 from chess_gantry.web_app import HTML, GantryHTTPServer, RequestHandler
 from chess_gantry.clerk_auth import ClerkSettings, render_dashboard
+from chess_gantry.board_sensor import SyntheticBoardSensor
 
 ROOT = Path(__file__).resolve().parents[1]
 CLERK_ENVIRONMENT = {"CLERK_PUBLISHABLE_KEY": "pk_test_Y2xlcmsuZXhhbXBsZS5jb20k"}
@@ -79,6 +80,7 @@ class WebAppTests(unittest.TestCase):
         )
         self.server.live_game_manager = LiveGameManager(root, self.config, demo=True)
         self.server.reed_switch = SimulatedReedSwitch()
+        self.server.board_sensor = SyntheticBoardSensor(sample_hz=300, stable_samples=2)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_port}"
@@ -88,6 +90,7 @@ class WebAppTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=2)
         self.controller.disconnect()
+        self.server.board_sensor.close()
         self.temporary.cleanup()
 
     def request(self, path, payload=None):
@@ -196,6 +199,8 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn('id="keyboardArm"', html)
         self.assertNotIn('id="liveBoardReset"', html)
         self.assertNotIn('id="confirm"', html)
+        self.assertIn('id="sensorBoard"', html)
+        self.assertIn("/api/sensor/matrix", html)
 
     def test_reed_switch_api_reports_open_and_closed(self) -> None:
         _, first = self.request("/api/reed", {})
@@ -222,6 +227,32 @@ class WebAppTests(unittest.TestCase):
         payload = json.loads(raised.exception.read())
         raised.exception.close()
         self.assertIn("did not respond", payload["error"])
+
+    def test_synthetic_sensor_dataset_updates_piece_tracking(self) -> None:
+        _, initial = self.request("/api/sensor/status")
+        self.assertEqual(len(initial["sensor"]["matrix"]), 8)
+        _, started = self.request("/api/sensor/dataset", {"dataset": "e2e4"})
+        self.assertIn(started["sensor"]["state"], {"ready", "waiting", "move"})
+        for _ in range(100):
+            _, status = self.request("/api/sensor/status")
+            if status["sensor"]["last_move"] == "e2e4":
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(status["sensor"]["last_move"], "e2e4")
+        self.assertTrue(
+            any(piece["square"] == "e4" for piece in status["sensor"]["pieces"])
+        )
+
+    def test_synthetic_sensor_rejects_invalid_matrix(self) -> None:
+        request = urllib.request.Request(
+            self.base + "/api/sensor/matrix",
+            data=json.dumps({"matrix": [[0]]}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=3)
+        self.assertEqual(raised.exception.code, 409)
+        raised.exception.close()
 
     def test_live_game_status_and_start_validation_api(self) -> None:
         _, status = self.request("/api/live/status")

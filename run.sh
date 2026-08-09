@@ -190,6 +190,13 @@ RUN_ARGS=(
   --env "CHESS_GANTRY_MCP23017_ADDRESS=0x20"
 )
 
+if [[ -n ${LICHESS_TOKEN:-} ]]; then
+  RUN_ARGS+=(--env "LICHESS_TOKEN=$LICHESS_TOKEN")
+  printf '==> Lichess Board API write token attached\n'
+else
+  printf '==> LICHESS_TOKEN is unset; sensor move writes to Lichess are disabled\n'
+fi
+
 if [[ $ALT_PORT != "$HTTP_PORT" ]]; then
   RUN_ARGS+=(--publish "${BIND_ADDRESS}:${ALT_PORT}:${APP_PORT}")
 fi

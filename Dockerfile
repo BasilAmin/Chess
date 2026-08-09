@@ -72,7 +72,7 @@ RUN set -eu; \
     uv pip install --no-cache --no-deps --system --python /usr/bin/python3 \
       --prefix "${ROOTFS}/usr" /build/dist/chess_gantry-*.whl
 
-COPY config*.json relay.html pyproject.toml uv.lock README.md RUNNING.md ./tree/
+COPY config*.json relay.html pyproject.toml uv.lock README.md ./tree/
 COPY package.json package-lock.json .prettierrc.json .prettierignore ./tree/
 COPY examples ./tree/examples/
 COPY schemas ./tree/schemas/
