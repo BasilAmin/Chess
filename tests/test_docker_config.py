@@ -42,6 +42,12 @@ class DockerConfigurationTests(unittest.TestCase):
             self.assertTrue(path.exists())
             self.assertTrue(path.stat().st_mode & 0o111)
 
+    def test_pi_installer_uses_the_current_run_script_deployment(self) -> None:
+        script = (ROOT / "scripts" / "install_pi.sh").read_text(encoding="utf-8")
+        self.assertIn('build -t "${CHESS_GANTRY_IMAGE:-chess:latest}"', script)
+        self.assertIn("./run.sh", script)
+        self.assertNotIn("docker-compose.pi.yml", script)
+
     def test_run_script_builds_and_runs_the_image(self) -> None:
         script = (ROOT / "run.sh").read_text(encoding="utf-8")
         self.assertIn('"${DOCKER[@]}" build -t "$IMAGE" .', script)

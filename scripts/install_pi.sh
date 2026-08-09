@@ -23,8 +23,8 @@ case "$ARCH" in
     ;;
 esac
 
-if ! command -v docker > /dev/null 2>&1 || ! docker compose version > /dev/null 2>&1; then
-  printf 'Installing Docker Engine and the Compose plugin...\n'
+if ! command -v docker > /dev/null 2>&1; then
+  printf 'Installing Docker Engine...\n'
   sudo apt-get update
   sudo apt-get install -y ca-certificates curl
   INSTALLER="$(mktemp)"
@@ -49,12 +49,6 @@ if [[ -f $BOOT_CONFIG ]] && ! grep -qE '^dtparam=i2c_arm=on([[:space:]]|$)' "$BO
   I2C_REBOOT_REQUIRED=1
 fi
 
-if ! sudo docker compose version > /dev/null 2>&1; then
-  printf 'Installing the Docker Compose plugin...\n'
-  sudo apt-get update
-  sudo apt-get install -y docker-compose-plugin
-fi
-
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER"
 sudo usermod -aG dialout "$USER"
@@ -73,9 +67,8 @@ if [[ ! -f data/board_state.json ]]; then
   cp examples/board_state.standard.json data/board_state.json
 fi
 
-SERIAL_DEVICE="${CHESS_GANTRY_SERIAL_DEVICE:-/dev/ttyUSB0}"
+SERIAL_DEVICE="${CHESS_GANTRY_SERIAL_PORT:-/dev/ttyUSB0}"
 I2C_DEVICE="${CHESS_GANTRY_I2C_DEVICE:-/dev/i2c-1}"
-PORT="${CHESS_GANTRY_WEB_PORT:-8000}"
 
 if [[ -z "${CLERK_PUBLISHABLE_KEY:-}" ]]; then
   printf 'CLERK_PUBLISHABLE_KEY is not set. The dashboard authenticates with Clerk only.\n' >&2
@@ -83,35 +76,13 @@ if [[ -z "${CLERK_PUBLISHABLE_KEY:-}" ]]; then
   exit 2
 fi
 
-cat > .env.docker << EOF
-CHESS_GANTRY_WEB_PORT=$PORT
-CHESS_GANTRY_SERIAL_DEVICE=$SERIAL_DEVICE
-CHESS_GANTRY_I2C_DEVICE=$I2C_DEVICE
-CHESS_GANTRY_I2C_BUS=1
-CHESS_GANTRY_MCP23017_ADDRESS=0x20
-CLERK_PUBLISHABLE_KEY=$CLERK_PUBLISHABLE_KEY
-CLERK_SECRET_KEY=${CLERK_SECRET_KEY:-}
-EOF
-chmod 600 .env.docker
-
 DOCKER=(docker)
 if ! docker info > /dev/null 2>&1; then
   DOCKER=(sudo docker)
 fi
 
-compose() {
-  "${DOCKER[@]}" compose --env-file .env.docker -f docker-compose.pi.yml "$@"
-}
-
 printf 'Building the Chess Gantry container for %s. This can take several minutes on a Pi 3B+.\n' "$ARCH"
-compose build
-
-if [[ -e "$SERIAL_DEVICE" && -e "$I2C_DEVICE" ]]; then
-  compose up -d
-else
-  printf 'Required devices are missing, so the image was built but the service was not started.\n'
-  printf '  serial: %s\n  I2C: %s\n' "$SERIAL_DEVICE" "$I2C_DEVICE"
-fi
+"${DOCKER[@]}" build -t "${CHESS_GANTRY_IMAGE:-chess:latest}" .
 
 LAN_IP="$(hostname -I 2> /dev/null | awk '{print $1}')"
 LAN_IP="${LAN_IP:-RASPBERRY_PI_IP}"
@@ -120,20 +91,17 @@ cat << EOF
 
 Chess Gantry Docker installation complete.
 
-Dashboard URL, open to everyone who can route here, Clerk sign-in required:
-  http://$LAN_IP:$PORT/
+Detected devices:
+  serial: $SERIAL_DEVICE
+  I2C:    $I2C_DEVICE
 
-Management commands:
-  ./scripts/pi_docker.sh status
-  ./scripts/pi_docker.sh logs
-  ./scripts/pi_docker.sh test
-  ./scripts/pi_docker.sh restart
-  ./scripts/pi_docker.sh update
-  ./scripts/pi_docker.sh down
+Start the dashboard with:
+  ./run.sh
 
-If the service was not started, connect the Ender controller and run:
-  ./scripts/pi_docker.sh up
+Dashboard address after run.sh starts:
+  http://$LAN_IP/
 
 The current user was added to the docker and dialout groups. Log out and back in
-before using Docker without sudo. Keep .env.docker private; it holds the Clerk keys.
+before using Docker without sudo. Export CLERK_PUBLISHABLE_KEY and optionally
+CLERK_SECRET_KEY before running run.sh if you do not use the values in that script.
 EOF
