@@ -8,7 +8,10 @@ from .errors import ConfigurationError, GantryError
 
 
 IODIRB = 0x01
+IODIRA = 0x00
+GPPUA = 0x0C
 GPPUB = 0x0D
+GPIOA = 0x12
 GPIOB = 0x13
 GPB0_MASK = 0x01
 
@@ -120,3 +123,92 @@ def reed_transition(previous: Optional[ReedState], current: ReedState) -> str:
     if previous.closed == current.closed:
         return ""
     return f"{'CLOSED' if current.closed else 'OPENED'} {current.pin}"
+
+
+class MCP23017BankDiagnostic:
+    def __init__(
+        self,
+        *,
+        bus_number: int = 1,
+        addresses: tuple[int, ...] = tuple(range(0x20, 0x28)),
+        active_low: bool = True,
+        configure: bool = False,
+        bus_factory: Optional[Callable[[int], Any]] = None,
+    ) -> None:
+        if not 0 <= bus_number <= 255:
+            raise ConfigurationError("I2C bus number must be between 0 and 255")
+        if not addresses or any(not 0x03 <= value <= 0x77 for value in addresses):
+            raise ConfigurationError("diagnostic addresses must be valid I2C addresses")
+        self.bus_number = bus_number
+        self.addresses = addresses
+        self.active_low = active_low
+        self.configure = configure
+        self._bus_factory = bus_factory or MCP23017ReedSwitch._default_bus_factory
+        self._configured: set[int] = set()
+
+    def read(self) -> dict[str, Any]:
+        responding: dict[str, Any] = {}
+        failures: dict[str, str] = {}
+        try:
+            with self._bus_factory(self.bus_number) as bus:
+                for address in self.addresses:
+                    label = f"0x{address:02X}"
+                    try:
+                        if self.configure and address not in self._configured:
+                            bus.write_byte_data(address, IODIRA, 0xFF)
+                            bus.write_byte_data(address, IODIRB, 0xFF)
+                            bus.write_byte_data(address, GPPUA, 0xFF)
+                            bus.write_byte_data(address, GPPUB, 0xFF)
+                            self._configured.add(address)
+                        gpio_a = bus.read_byte_data(address, GPIOA)
+                        gpio_b = bus.read_byte_data(address, GPIOB)
+                        pins = {}
+                        for port, raw in (("A", gpio_a), ("B", gpio_b)):
+                            for pin in range(8):
+                                raw_high = bool(raw & (1 << pin))
+                                closed = not raw_high if self.active_low else raw_high
+                                pins[f"GP{port}{pin}"] = {
+                                    "closed": closed,
+                                    "raw_high": raw_high,
+                                }
+                        responding[label] = {
+                            "configured": self.configure,
+                            "gpio_a": f"0x{gpio_a:02X}",
+                            "gpio_b": f"0x{gpio_b:02X}",
+                            "closed_pins": [
+                                pin for pin, value in pins.items() if value["closed"]
+                            ],
+                            "pins": pins,
+                        }
+                    except OSError as exc:
+                        self._configured.discard(address)
+                        failures[label] = str(exc)
+        except GantryError:
+            raise
+        return {
+            "bus": self.bus_number,
+            "responding": responding,
+            "failures": failures,
+        }
+
+
+def bank_transitions(
+    previous: Optional[dict[str, Any]], current: dict[str, Any]
+) -> list[str]:
+    messages = []
+    previous_devices = previous["responding"] if previous else {}
+    for address, device in current["responding"].items():
+        if address not in previous_devices:
+            messages.append(f"FOUND {address}")
+        old_pins = previous_devices.get(address, {}).get("pins", {})
+        for pin, value in device["pins"].items():
+            prior = old_pins.get(pin)
+            if prior is None:
+                continue
+            if prior["closed"] != value["closed"]:
+                state = "CLOSED" if value["closed"] else "OPENED"
+                messages.append(f"{address} {pin} {state}")
+    for address in previous_devices:
+        if address not in current["responding"]:
+            messages.append(f"LOST {address}")
+    return messages

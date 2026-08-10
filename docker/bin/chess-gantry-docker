@@ -17,6 +17,7 @@ DEVICE_REPORT = (
     ("SPI 0.0", "/dev/spidev0.0"),
     ("SPI 0.1", "/dev/spidev0.1"),
     ("USB bus", "/dev/bus/usb"),
+    ("Overhead camera", os.environ.get("CHESS_GANTRY_CAMERA_SOURCE", "/dev/video0")),
 )
 
 

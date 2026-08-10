@@ -22,7 +22,13 @@ from .serial_link import (
     parse_endstop_states,
 )
 from .service import GantryService
-from .reed_switch import MCP23017ReedSwitch, ReedState, reed_transition
+from .reed_switch import (
+    MCP23017BankDiagnostic,
+    MCP23017ReedSwitch,
+    ReedState,
+    bank_transitions,
+    reed_transition,
+)
 from .debug_console.runtime import TOKEN_ENVIRONMENT_KEY
 from .lichess_pgn import fetch_pgn, pgn_moves
 from .lichess_follow import follow_game
@@ -247,6 +253,76 @@ def _parser() -> ArgumentParser:
     )
     reed_test.add_argument(
         "--demo", action="store_true", help="alternate simulated open/closed states"
+    )
+
+    reed_bank_test = commands.add_parser(
+        "reed-bank-test",
+        help="scan MCP23017 addresses 0x20-0x27 and watch all GPA/GPB inputs",
+    )
+    reed_bank_test.add_argument("--bus", type=int, default=1)
+    reed_bank_test.add_argument(
+        "--first-address", type=lambda value: int(value, 0), default=0x20
+    )
+    reed_bank_test.add_argument(
+        "--last-address", type=lambda value: int(value, 0), default=0x27
+    )
+    reed_bank_test.add_argument("--interval", type=float, default=0.1)
+    reed_bank_test.add_argument("--samples", type=int, default=100)
+    reed_bank_test.add_argument("--active-high", action="store_true")
+    reed_bank_test.add_argument(
+        "--configure-inputs",
+        action="store_true",
+        help="write all GPA/GPB pins as pulled-up inputs; use only for confirmed MCP23017 addresses",
+    )
+
+    vision_markers = commands.add_parser(
+        "vision-markers",
+        help="generate unique ArUco piece tags and four board reference tags",
+    )
+    vision_markers.add_argument(
+        "--output-dir",
+        default="data/vision-markers",
+        help="directory for marker PNGs and manifest (default: data/vision-markers)",
+    )
+    vision_markers.add_argument(
+        "--marker-pixels",
+        type=int,
+        default=240,
+        help="marker image width and height in pixels (default: 240)",
+    )
+
+    vision_test = commands.add_parser(
+        "vision-test",
+        help="test one overhead camera or image with exact-piece ArUco detection",
+    )
+    vision_test.add_argument(
+        "--source",
+        default="demo",
+        help="demo, demo:e2e4, image path, camera index/device, stream URL, or snapshot:URL",
+    )
+    vision_test.add_argument(
+        "--frames",
+        type=int,
+        default=3,
+        help="frames to process before exiting; zero watches until Ctrl+C (default: 3)",
+    )
+    vision_test.add_argument(
+        "--interval",
+        type=float,
+        default=0.2,
+        help="seconds between processed frames (default: 0.2)",
+    )
+    vision_test.add_argument(
+        "--stable-frames",
+        type=int,
+        default=3,
+        help="matching frames required before accepting a board (default: 3)",
+    )
+    vision_test.add_argument(
+        "--min-marker-px",
+        type=float,
+        default=24.0,
+        help="minimum detected marker side in pixels (default: 24)",
     )
 
     reference_gantry = commands.add_parser(
@@ -706,6 +782,9 @@ _COMMANDS = frozenset(
         "diagnose",
         "endstop-watch",
         "reed-test",
+        "reed-bank-test",
+        "vision-markers",
+        "vision-test",
         "reference-gantry",
         "home-gantry",
         "web",
@@ -870,6 +949,81 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                 sample += 1
                 if args.samples == 0 or sample < args.samples:
                     sleep(args.interval)
+            return 0
+
+        if args.command == "reed-bank-test":
+            if args.first_address > args.last_address:
+                parser.error("--first-address cannot exceed --last-address")
+            if args.samples < 0:
+                parser.error("--samples cannot be negative")
+            if args.interval <= 0:
+                parser.error("--interval must be positive")
+            addresses = tuple(range(args.first_address, args.last_address + 1))
+            reader = MCP23017BankDiagnostic(
+                bus_number=args.bus,
+                addresses=addresses,
+                active_low=not args.active_high,
+                configure=args.configure_inputs,
+            )
+            print(
+                f"Scanning /dev/i2c-{args.bus} addresses "
+                f"0x{args.first_address:02X}-0x{args.last_address:02X}; "
+                + (
+                    "all GPA/GPB pins will be configured as pulled-up inputs."
+                    if args.configure_inputs
+                    else "read-only discovery mode; no configuration registers are written."
+                )
+            )
+            previous = None
+            count = 0
+            while args.samples == 0 or count < args.samples:
+                current = reader.read()
+                if previous is None:
+                    _print_json(current)
+                else:
+                    for message in bank_transitions(previous, current):
+                        print(message, flush=True)
+                previous = current
+                count += 1
+                if args.samples == 0 or count < args.samples:
+                    sleep(args.interval)
+            return 0
+
+        if args.command == "vision-markers":
+            from .vision import generate_marker_pack
+
+            manifest = generate_marker_pack(
+                Path(args.output_dir), marker_pixels=args.marker_pixels
+            )
+            print(
+                f"Generated {len(manifest['pieces'])} piece markers and 4 board references "
+                f"in {args.output_dir}."
+            )
+            print(f"Manifest: {Path(args.output_dir) / 'manifest.json'}")
+            return 0
+
+        if args.command == "vision-test":
+            from .vision import VisionBoardTracker, open_frame_source
+
+            if args.frames < 0:
+                parser.error("--frames cannot be negative")
+            if args.interval <= 0:
+                parser.error("--interval must be positive")
+            tracker = VisionBoardTracker(
+                stable_frames=args.stable_frames,
+                min_marker_side_px=args.min_marker_px,
+            )
+            reader = open_frame_source(args.source)
+            frame_index = 0
+            try:
+                while args.frames == 0 or frame_index < args.frames:
+                    status = tracker.process_frame(reader.read())
+                    frame_index += 1
+                    _print_json(status)
+                    if args.frames == 0 or frame_index < args.frames:
+                        sleep(args.interval)
+            finally:
+                reader.close()
             return 0
 
         if args.command == "reference-gantry":

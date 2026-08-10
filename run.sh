@@ -4,8 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-CLERK_PUBLISHABLE_KEY="${CLERK_PUBLISHABLE_KEY:-pk_test_dGhhbmtmdWwtcmF5LTU4LmNsZXJrLmFjY291bnRzLmRldiQ}"
-CLERK_SECRET_KEY="${CLERK_SECRET_KEY:-sk_test_qC94SlNs7psYuUgRdeRQejA8K2lHS7yggshCXkTwYz}"
+CLERK_PUBLISHABLE_KEY="${CLERK_PUBLISHABLE_KEY:-}"
 
 IMAGE="${CHESS_GANTRY_IMAGE:-chess:latest}"
 CONTAINER="${CHESS_GANTRY_CONTAINER:-chess-gantry}"
@@ -15,11 +14,13 @@ ALT_PORT="${CHESS_GANTRY_ALT_PORT:-8000}"
 APP_PORT=8000
 SERIAL_DEVICE="${CHESS_GANTRY_SERIAL_PORT:-/dev/ttyUSB0}"
 I2C_DEVICE="${CHESS_GANTRY_I2C_DEVICE:-/dev/i2c-1}"
+CAMERA_SOURCE="${CHESS_GANTRY_CAMERA_SOURCE:-}"
+VIDEO_DEVICE="${CHESS_GANTRY_VIDEO_DEVICE:-}"
 APP_UID="${CHESS_GANTRY_APP_UID:-65532}"
 APP_GID="${CHESS_GANTRY_APP_GID:-65532}"
 
-if [[ $CLERK_PUBLISHABLE_KEY == pk_test_REPLACE_WITH_YOUR_DEV_KEY ]]; then
-  printf 'Paste your Clerk development publishable key into %s (CLERK_PUBLISHABLE_KEY) or export it.\n' "$0" >&2
+if [[ -z $CLERK_PUBLISHABLE_KEY ]]; then
+  printf 'Export CLERK_PUBLISHABLE_KEY before running %s.\n' "$0" >&2
   printf 'Copy it from the Clerk dashboard; it looks like pk_test_abc123...\n' >&2
   exit 2
 fi
@@ -182,13 +183,35 @@ RUN_ARGS=(
   --volume "$ROOT/config.json:/app/config.json:ro"
   --volume "$ROOT/data:/app/data"
   --env "CLERK_PUBLISHABLE_KEY=$CLERK_PUBLISHABLE_KEY"
-  --env "CLERK_SECRET_KEY=$CLERK_SECRET_KEY"
   --env "CHESS_GANTRY_PUBLIC_HOST=$MDNS_NAME"
   --env "CHESS_GANTRY_WEB_HOST=0.0.0.0"
   --env "CHESS_GANTRY_WEB_PORT=$APP_PORT"
   --env "CHESS_GANTRY_I2C_BUS=1"
   --env "CHESS_GANTRY_MCP23017_ADDRESS=0x20"
+  --env "CHESS_GANTRY_DISTROLESS=1"
 )
+
+if [[ -n $CAMERA_SOURCE && -n $VIDEO_DEVICE ]]; then
+  printf 'Set only CHESS_GANTRY_CAMERA_SOURCE or CHESS_GANTRY_VIDEO_DEVICE, not both.\n' >&2
+  exit 2
+fi
+
+if [[ -n $VIDEO_DEVICE ]]; then
+  if [[ ! -c $VIDEO_DEVICE ]]; then
+    printf 'Camera device %s does not exist or is not a character device.\n' "$VIDEO_DEVICE" >&2
+    exit 2
+  fi
+  RUN_ARGS+=(--device "$VIDEO_DEVICE:/dev/video0" --env "CHESS_GANTRY_CAMERA_SOURCE=/dev/video0" --env "CHESS_GANTRY_CAMERA_ENABLED=1")
+  if video_gid="$(stat -c '%g' "$VIDEO_DEVICE" 2> /dev/null)"; then
+    RUN_ARGS+=(--group-add "$video_gid")
+  fi
+  printf '==> Camera device %s attached as /dev/video0\n' "$VIDEO_DEVICE"
+elif [[ -n $CAMERA_SOURCE ]]; then
+  RUN_ARGS+=(--env "CHESS_GANTRY_CAMERA_SOURCE=$CAMERA_SOURCE" --env "CHESS_GANTRY_CAMERA_ENABLED=1")
+  printf '==> Network or configured camera source attached\n'
+else
+  printf '==> No camera source configured; overhead vision starts disabled\n'
+fi
 
 if [[ -n ${LICHESS_TOKEN:-} ]]; then
   RUN_ARGS+=(--env "LICHESS_TOKEN=$LICHESS_TOKEN")

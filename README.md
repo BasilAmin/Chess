@@ -54,11 +54,12 @@ npm ci
 
 This compiles Python, runs all automated tests, runs formatting and policy
 checks, plans `e2e4`, simulates the magnet, and streams a simulated board sweep.
-It uses isolated files under `data/demo/` and does not open a serial or I2C
-device. Success ends with:
+It also renders and detects a perspective-distorted exact-piece vision board.
+It uses isolated files under `data/demo/` and does not open a serial, I2C, or
+camera device. Success ends with:
 
 ```text
-Demo readiness checks passed. No physical serial port was opened.
+Demo readiness checks passed, including exact-piece vision. No physical serial port was opened.
 ```
 
 Run the checks separately when diagnosing a failure:
@@ -185,11 +186,33 @@ uv run chess-gantry --config config.demo.json workspace-test \
 simulator exercise the same streaming path used for real commands; they do not
 connect to hardware when `--demo` is present.
 
+### 6. Test Exact-Piece Vision Without A Camera
+
+Render and detect a complete perspective-distorted tagged board:
+
+```bash
+uv run chess-gantry vision-test \
+  --source demo --frames 3 --stable-frames 3 --interval 0.1
+```
+
+Simulate a completed `e2e4` position:
+
+```bash
+uv run chess-gantry vision-test \
+  --source demo:e2e4 --frames 3 --stable-frames 3 --interval 0.1
+```
+
+In the dashboard, enter `demo` or `demo:e2e4` in **Overhead exact-piece
+vision**, then press **Start vision**. This tests OpenCV, all 32 exact piece IDs,
+four board references, perspective registration, legal-move matching, stability,
+and the authenticated preview without a camera.
+
 ## Raspberry Pi Deployment
 
 The target is a Raspberry Pi running a 64-bit Linux OS. The current deployment
 path is `run.sh`; the old Docker Compose scripts are not part of the operating
-workflow.
+workflow. The vision dependency ships ARM64 wheels; 32-bit `armv7l` Pi OS is
+rejected by the installer.
 
 ### First Installation
 
@@ -261,12 +284,19 @@ CHESS_GANTRY_HTTP_PORT=8080 ./run.sh
 CHESS_GANTRY_BIND_INTERFACE=wlan0 ./run.sh
 CHESS_GANTRY_MDNS_NAME=relay-chess.local ./run.sh
 CHESS_GANTRY_IMAGE=chess:test ./run.sh
+CHESS_GANTRY_CAMERA_SOURCE='http://PHONE_IP:8080/video' ./run.sh
+CHESS_GANTRY_VIDEO_DEVICE=/dev/video0 ./run.sh
 ```
 
 If no serial controller is connected, `run.sh` explicitly prints that it is
 starting in demo mode. If no I2C device exists, the dashboard still starts and
 the physical reed panel reports an I2C error; the synthetic sensor lab remains
 usable.
+
+Set only one camera variable. `CHESS_GANTRY_CAMERA_SOURCE` accepts a network
+stream or `snapshot:URL`; `CHESS_GANTRY_VIDEO_DEVICE` passes a local V4L2 device
+through as `/dev/video0` and grants its host group to the unprivileged
+container. Neither path uses `--privileged`.
 
 ### Update The Pi
 
@@ -842,10 +872,307 @@ Watch until Control-C instead:
 uv run chess-gantry reed-test --bus 1 --address 0x20
 ```
 
+If the complete reed assembly uses several MCP23017 expanders, first perform a
+read-only discovery across addresses `0x20` through `0x27`:
+
+```bash
+uv run chess-gantry reed-bank-test \
+  --bus 1 --first-address 0x20 --last-address 0x27 \
+  --samples 1
+```
+
+Compare this with `i2cdetect -y 1`. After confirming the exact addresses really
+are MCP23017 reed-only expanders, configure and watch one known device at a time:
+
+```bash
+uv run chess-gantry reed-bank-test \
+  --bus 1 --first-address 0x20 --last-address 0x20 \
+  --configure-inputs --samples 100 --interval 0.1
+```
+
+`--configure-inputs` writes all 16 pins as pulled-up inputs. Never use it on an
+unknown address or an MCP23017 that intentionally drives outputs. The JSON
+report shows responding and failed addresses, raw GPIOA/GPIOB bytes, all pin
+states, and currently closed pins. Later lines identify changes such as `0x20
+GPA5 CLOSED`, `FOUND 0x20`, or `LOST 0x20`. This diagnostic does not assign pins
+to chess squares; it isolates I2C, addressing, power, pull-up, pin, and switch
+failures first.
+
 Use `--active-high` only for deliberately inverted electrical behavior. The
 dashboard polls the same input and shows OPEN/CLOSED, HIGH/LOW, errors, and the
 transition count. If it fails, check `/dev/i2c-1`, address straps, RESET, 3.3 V,
 shared ground, and the result of `i2cdetect -y 1`.
+
+## Overhead Exact-Piece Vision
+
+The vision path uses one fixed top-down camera and `opencv-python-headless`.
+Every physical piece has a unique binary ArUco marker. Four larger markers
+around the board establish the image-to-board homography on every frame.
+
+This is not raw color detection. Colors drift with exposure, white balance,
+shadows, glare, phone processing, printing, and JPEG compression. A generic
+pretrained chess CNN is also not authoritative: it is tied to its training
+domain and normally identifies a class such as "white rook," not the exact
+physical rook. Error-correcting tags provide exact IDs, fast Pi inference, no
+training step, and explicit failure instead of a low-confidence guess.
+
+### Reliability Model
+
+The detector:
+
+- uses `DICT_ARUCO_MIP_36h12`, with AprilTag 36h11 as an OpenCV compatibility
+  fallback;
+- uses fixed board-reference IDs `0`, `1`, `2`, and `3`;
+- assigns unique IDs `10` through `41` to the 32 starting pieces;
+- recalculates perspective correction from the references every frame;
+- rejects unknown IDs, duplicate IDs, missing references, out-of-board tags,
+  two tags on one square, undersized tags, and square-boundary placements;
+- waits for three identical frames by default;
+- treats widespread missing tags as hand occlusion or movement;
+- compares the complete exact-piece map against every legal successor;
+- handles ordinary moves, captures, en passant, and castling;
+- commits only one uniquely matching legal move;
+- reports `ambiguous`, `illegal`, `conflict`, or `waiting` instead of guessing;
+- reports every configured identity with expected and observed algebraic square,
+  zero-based `{x,y}` coordinate, camera `{row,column}`, and match state;
+- records each accepted transition with exact piece ID, from/to square and
+  coordinate, captured identity/location, and castling rook transfer;
+- retains the physical pawn tag across promotion while updating its tracked type
+  to queen, rook, bishop, or knight;
+- can require agreement with an auxiliary 8 x 8 occupancy matrix;
+- can submit an accepted move once through the Lichess Board API.
+
+A single camera cannot see through a hand. The correct behavior while the board
+is covered is to wait and reacquire the complete settled position. "Flawless"
+operation means zero silently wrong commits, not pretending every frame can be
+classified.
+
+### Generate And Print Tags
+
+```bash
+uv run chess-gantry vision-markers \
+  --output-dir data/vision-markers \
+  --marker-pixels 600
+```
+
+This creates 36 PNGs and `data/vision-markers/manifest.json`:
+
+```text
+marker-000.png  board top-left reference
+marker-001.png  board top-right reference
+marker-002.png  board bottom-right reference
+marker-003.png  board bottom-left reference
+marker-010.png through marker-041.png  exact physical pieces
+```
+
+Use the manifest to attach the correct tag to each piece. Print with no image
+interpolation, retain a clean white border, and mount each piece tag horizontally
+on a flat matte cap. Never bend a marker over a king crown or bishop top. The cap
+must remain centered over the piece base.
+
+Use larger reference tags than piece tags. Piece markers should appear at least
+40 to 60 pixels wide in the final camera image. The software's 24-pixel minimum
+is a rejection floor, not a recommended target.
+
+### Mount The Camera
+
+The expected camera view is:
+
+```text
+top-left     a8
+top-right    h8
+bottom-left  a1
+bottom-right h1
+```
+
+Place reference `0` outside the top-left board corner, `1` top-right, `2`
+bottom-right, and `3` bottom-left.
+
+Requirements:
+
+- camera directly above the board center and within a few degrees of vertical;
+- board fills roughly 70 to 85 percent of the image;
+- all four references remain visible;
+- normal lens, not an ultra-wide lens;
+- preferably 1440p or higher for small piece caps;
+- diffuse symmetrical lighting and matte marker surfaces;
+- locked orientation, zoom, focus, exposure, and white balance when possible;
+- rigid mount that players cannot bump.
+
+Live homography corrects perspective and small mounting error. It does not
+remove severe parallax from an angled camera or a tall cap placed at a square
+edge. Near-vertical mounting and centered pieces remain mandatory.
+
+### Test A Saved Phone Photo
+
+Take a top-down photo with all references and tagged pieces visible:
+
+```bash
+uv run chess-gantry vision-test \
+  --source /path/to/board-photo.jpg \
+  --frames 3 --stable-frames 3
+```
+
+The image is processed three times to exercise stability gating. A standard
+position should report:
+
+```text
+state: ready
+observed_piece_count: 32
+expected_piece_count: 32
+reference_error: close to 0
+smallest_marker_px: preferably 40 or higher
+error: null
+```
+
+### Use A Phone Camera
+
+Install a LAN IP-camera app, mount the phone horizontally over the board, keep it
+powered, disable sleep, and put the phone and Pi/computer on the same
+non-isolated Wi-Fi network.
+
+Android IP-camera apps commonly expose MJPEG at `/video`, `/videofeed`, or
+`/stream.mjpg`:
+
+```bash
+uv run chess-gantry vision-test \
+  --source 'http://PHONE_IP:8080/video' \
+  --frames 30 --stable-frames 3 --interval 0.2
+```
+
+Use the actual media endpoint, not the app's HTML landing page. High-resolution
+snapshots are often more reliable than a buffered MJPEG stream:
+
+```bash
+uv run chess-gantry vision-test \
+  --source 'snapshot:http://PHONE_IP:8080/shot.jpg' \
+  --frames 10 --stable-frames 3 --interval 0.3
+```
+
+Start the distroless container with the same source:
+
+```bash
+export CLERK_PUBLISHABLE_KEY="pk_test_your_key"
+CHESS_GANTRY_CAMERA_SOURCE='snapshot:http://PHONE_IP:8080/shot.jpg' ./run.sh
+```
+
+The container makes an outbound request to the phone; no inbound camera port is
+published. Use the phone's numeric LAN IP. `localhost` inside the container is
+not the phone. For iPhone, use any app that provides an MJPEG, RTSP, or repeated
+JPEG snapshot URL and supply that exact URL.
+
+### Use A USB Or V4L2 Camera
+
+```bash
+ls -l /dev/video* 2> /dev/null
+uv run chess-gantry vision-test \
+  --source /dev/video0 --frames 30 --stable-frames 3
+```
+
+Pass a tested device to the container:
+
+```bash
+export CLERK_PUBLISHABLE_KEY="pk_test_your_key"
+CHESS_GANTRY_VIDEO_DEVICE=/dev/video0 ./run.sh
+```
+
+The initial implementation supports ordinary V4L2/USB cameras. A Raspberry Pi
+CSI camera using a libcamera-only pipeline may expose several media and
+subdevice nodes and is not guaranteed to work by selecting an arbitrary
+`/dev/video*`. First configure a working V4L2 or network stream, then use that
+tested source.
+
+### Dashboard Operation
+
+Open **Overhead exact-piece vision** and:
+
+1. Enter `demo`, `demo:e2e4`, an image/device path, a stream URL, or a
+   `snapshot:URL`.
+2. Press **Start vision**.
+3. Wait until every expected tag appears and state becomes `ready`.
+4. Move exactly one legal piece and uncover the board.
+5. Confirm the exact ID, UCI move, square, FEN, and event.
+6. Enable **Require occupancy agreement** only when the synthetic or future full
+   reed matrix represents the same position.
+7. Enable Lichess only after camera-only and fused testing produce zero wrong
+   commits.
+
+Capture and detection run in one background worker. Browser polling reads cached
+status and never opens a second camera. The preview is Clerk-authenticated and
+served with `Cache-Control: no-store`.
+
+Authenticated endpoints:
+
+```text
+GET  /api/vision/status
+GET  /api/vision/frame
+POST /api/vision/configure
+POST /api/vision/reset
+POST /api/vision/retry
+POST /api/vision/fusion
+POST /api/vision/lichess
+```
+
+A failed or uncertain Lichess write is attempted only once for a stable camera
+transition. Repeated unchanged frames do not resubmit it. Check the remote game
+first, then use **Retry failed write once** only when one deliberate retry is
+safe.
+
+### Reed And Vision Fusion
+
+The current MCP23017 test reads one GPB0 switch, not 64 board squares. True
+physical fusion requires a complete debounced 8 x 8 occupancy provider. Until
+then, the dashboard fusion switch uses the synthetic 8 x 8 matrix to test the
+fusion logic.
+
+Keep the MCP23017 and reed code enabled while diagnosing the physical board.
+Vision works independently if the reed hardware is noisy or unavailable. Do not
+map a 64-switch board in software until its actual multiplexer/expander topology,
+addresses, pin-to-square order, active level, pull-ups, and scan traces are
+known; guessing that mapping can conceal a wiring fault. The existing GPB0
+terminal test remains the first electrical isolation tool.
+
+The rule is conservative:
+
+```text
+exact vision occupancy == auxiliary 8 x 8 occupancy
+and the exact identity map matches exactly one legal successor
+```
+
+Disagreement produces `conflict`; neither source overrides the other. Vision
+provides identity. Reed switches provide independent lighting-free occupancy.
+
+### Acceptance Test
+
+Before enabling automatic Lichess or second-board writes, record and replay at
+least 500 to 1,000 moves on the actual board, including:
+
+- normal moves, captures, castling, and en passant;
+- hands and sleeves covering the board;
+- pieces near boundaries, rotated caps, and deliberately hidden tags;
+- dim, bright, warm, cool, and mixed lighting;
+- glare, shadows, focus changes, and exposure changes;
+- Wi-Fi interruption and stale snapshots;
+- a bumped camera or reference marker;
+- deliberate illegal piece changes.
+
+Measure wrong commits, abstentions, missing moves, latency, false IDs,
+registration failure, and reed/vision disagreement separately. The release
+criterion for automatic writes should be zero wrong commits. Waiting for
+correction is acceptable; silently registering the wrong move is not.
+
+### Better Than Color Or A CNN
+
+Color can be optional redundancy, such as a broad white/black ring around a
+binary tag. Do not assign 32 authoritative identities by color.
+
+A custom CNN or YOLO model can later detect hands, fallen pieces, uncapped
+pieces, or semantic classes as a secondary validator. Making it authoritative
+requires a large dataset captured with this exact board, pieces, camera, lens,
+height, and lighting, plus independent held-out testing. It still cannot
+distinguish two physical pieces of the same class without another identity
+channel. For this one-camera system, fiducials plus occupancy fusion are more
+accurate, explainable, efficient, and testable.
 
 ## Lichess
 
@@ -998,6 +1325,9 @@ uv run chess-gantry COMMAND --help
 | `diagnose`           | Read Marlin identity, endstops, and position without motion    |
 | `endstop-watch`      | Print endstop hit/release transitions                          |
 | `reed-test`          | Read MCP23017 GPB0 or simulate transitions                     |
+| `reed-bank-test`     | Scan MCP23017 banks and watch all 16 pins per address          |
+| `vision-markers`     | Generate exact-piece and board-reference ArUco tags            |
+| `vision-test`        | Test a phone, image, V4L2 source, or synthetic tagged board    |
 | `reference-gantry`   | Assign origin while all three endstops are held                |
 | `home-gantry`        | Guarded `G28 X Y Z`, verification, and homing record           |
 | `home`               | Run configured homing commands                                 |
@@ -1115,7 +1445,10 @@ npm run format
 The suite covers geometry, path planning, persistence, serial acknowledgements,
 firmware configuration, container deployment, Clerk authentication, dashboard
 task ownership, keyboard jogging, board sensing, reed switching, and Lichess
-state handling.
+state handling. Vision tests render real tags, apply perspective distortion, run
+OpenCV detection, reconstruct exact identities, and verify legal moves,
+captures, castling, fusion vetoes, camera lifecycle, authenticated preview, and
+one-time Lichess submission.
 
 ---
 

@@ -20,6 +20,7 @@ from chess_gantry.service import GantryService
 from chess_gantry.web_app import HTML, GantryHTTPServer, RequestHandler
 from chess_gantry.clerk_auth import ClerkSettings, render_dashboard
 from chess_gantry.board_sensor import SyntheticBoardSensor
+from chess_gantry.vision import VisionManager
 
 ROOT = Path(__file__).resolve().parents[1]
 CLERK_ENVIRONMENT = {"CLERK_PUBLISHABLE_KEY": "pk_test_Y2xlcmsuZXhhbXBsZS5jb20k"}
@@ -81,6 +82,7 @@ class WebAppTests(unittest.TestCase):
         self.server.live_game_manager = LiveGameManager(root, self.config, demo=True)
         self.server.reed_switch = SimulatedReedSwitch()
         self.server.board_sensor = SyntheticBoardSensor(sample_hz=300, stable_samples=2)
+        self.server.vision_manager = VisionManager()
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_port}"
@@ -91,6 +93,7 @@ class WebAppTests(unittest.TestCase):
         self.thread.join(timeout=2)
         self.controller.disconnect()
         self.server.board_sensor.close()
+        self.server.vision_manager.close()
         self.temporary.cleanup()
 
     def request(self, path, payload=None):
@@ -201,6 +204,11 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn('id="confirm"', html)
         self.assertIn('id="sensorBoard"', html)
         self.assertIn("/api/sensor/matrix", html)
+        self.assertIn('id="visionSource"', html)
+        self.assertIn('id="visionMoveDetail"', html)
+        self.assertIn('id="visionRetry"', html)
+        self.assertIn("/api/vision/status", html)
+        self.assertIn("Overhead exact-piece vision", html)
 
     def test_reed_switch_api_reports_open_and_closed(self) -> None:
         _, first = self.request("/api/reed", {})
@@ -247,6 +255,46 @@ class WebAppTests(unittest.TestCase):
         request = urllib.request.Request(
             self.base + "/api/sensor/matrix",
             data=json.dumps({"matrix": [[0]]}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=3)
+        self.assertEqual(raised.exception.code, 409)
+        raised.exception.close()
+
+    def test_vision_demo_source_detects_exact_pieces_and_serves_preview(self) -> None:
+        _, configured = self.request(
+            "/api/vision/configure", {"source": "demo:e2e4", "enabled": True}
+        )
+        self.assertTrue(configured["vision"]["enabled"])
+        for _ in range(150):
+            _, status = self.request("/api/vision/status")
+            if status["vision"]["last_move"] == "e2e4":
+                break
+            threading.Event().wait(0.02)
+        self.assertEqual(status["vision"]["last_move"], "e2e4")
+        self.assertEqual(status["vision"]["observed_piece_count"], 32)
+        with urllib.request.urlopen(
+            self.base + "/api/vision/frame", timeout=3
+        ) as response:
+            self.assertEqual(response.headers["Content-Type"], "image/jpeg")
+            self.assertTrue(response.read().startswith(b"\xff\xd8"))
+
+    def test_vision_preview_without_a_frame_is_a_controlled_conflict(self) -> None:
+        request = urllib.request.Request(self.base + "/api/vision/frame")
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=3)
+        self.assertEqual(raised.exception.code, 409)
+        payload = json.loads(raised.exception.read())
+        raised.exception.close()
+        self.assertIn("no camera preview", payload["error"])
+
+    def test_vision_fusion_and_lichess_configuration_validation(self) -> None:
+        _, fused = self.request("/api/vision/fusion", {"enabled": True})
+        self.assertTrue(fused["vision"]["fusion_enabled"])
+        request = urllib.request.Request(
+            self.base + "/api/vision/lichess",
+            data=json.dumps({"game_id": "bad!", "write": True}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
         )
         with self.assertRaises(urllib.error.HTTPError) as raised:

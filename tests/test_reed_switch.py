@@ -3,11 +3,16 @@ from __future__ import annotations
 import unittest
 
 from chess_gantry.reed_switch import (
+    GPIOA,
     GPIOB,
+    GPPUA,
     GPPUB,
+    IODIRA,
     IODIRB,
+    MCP23017BankDiagnostic,
     MCP23017ReedSwitch,
     ReedState,
+    bank_transitions,
     reed_transition,
 )
 
@@ -64,6 +69,45 @@ class ReedSwitchTests(unittest.TestCase):
         self.assertEqual(reed_transition(opened, closed), "CLOSED GPB0")
         self.assertEqual(reed_transition(closed, opened), "OPENED GPB0")
         self.assertEqual(reed_transition(opened, opened), "")
+
+    def test_bank_diagnostic_configures_and_reads_all_sixteen_inputs(self) -> None:
+        registers = {GPIOA: 0xFE, GPIOB: 0x7F}
+        bus = FakeBus(registers)
+        result = MCP23017BankDiagnostic(
+            addresses=(0x20,), configure=True, bus_factory=lambda number: bus
+        ).read()
+        device = result["responding"]["0x20"]
+        self.assertEqual(device["closed_pins"], ["GPA0", "GPB7"])
+        self.assertIn((0x20, IODIRA, 0xFF), bus.writes)
+        self.assertIn((0x20, IODIRB, 0xFF), bus.writes)
+        self.assertIn((0x20, GPPUA, 0xFF), bus.writes)
+        self.assertIn((0x20, GPPUB, 0xFF), bus.writes)
+
+    def test_bank_discovery_does_not_write_unknown_i2c_devices(self) -> None:
+        bus = FakeBus({GPIOA: 0xFF, GPIOB: 0xFF})
+        result = MCP23017BankDiagnostic(
+            addresses=(0x20, 0x21), bus_factory=lambda number: bus
+        ).read()
+        self.assertEqual(bus.writes, [])
+        self.assertFalse(result["responding"]["0x20"]["configured"])
+
+    def test_bank_transition_reports_pin_and_device_changes(self) -> None:
+        previous = {
+            "responding": {
+                "0x20": {"pins": {"GPA0": {"closed": False}}},
+                "0x21": {"pins": {}},
+            }
+        }
+        current = {
+            "responding": {
+                "0x20": {"pins": {"GPA0": {"closed": True}}},
+                "0x22": {"pins": {}},
+            }
+        }
+        self.assertEqual(
+            bank_transitions(previous, current),
+            ["0x20 GPA0 CLOSED", "FOUND 0x22", "LOST 0x21"],
+        )
 
 
 if __name__ == "__main__":

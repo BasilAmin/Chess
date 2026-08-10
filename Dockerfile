@@ -28,7 +28,7 @@ RUN set -eu; \
 
 RUN set -eu; \
     . /etc/os-release; \
-    packages="python3 curl ca-certificates crypto-policies tzdata glibc-langpack-en"; \
+    packages="python3 curl ca-certificates crypto-policies tzdata glibc-langpack-en libstdc++ libgcc"; \
     if [ "${INCLUDE_DEV_TOOLS}" = "1" ]; then \
       packages="${packages} bash coreutils findutils grep sed gawk nodejs npm git-core"; \
     fi; \
@@ -171,7 +171,8 @@ ENV PATH=/usr/local/bin:/usr/bin:/bin \
     CHESS_GANTRY_WEB_PORT=8000 \
     CHESS_GANTRY_CONSOLE_HOST=0.0.0.0 \
     CHESS_GANTRY_CONSOLE_PORT=8300 \
-    CHESS_GANTRY_SERIAL_PORT=/dev/ttyUSB0
+    CHESS_GANTRY_SERIAL_PORT=/dev/ttyUSB0 \
+    CHESS_GANTRY_DISTROLESS=1
 
 WORKDIR /app
 USER ${APP_UID}:${APP_GID}
