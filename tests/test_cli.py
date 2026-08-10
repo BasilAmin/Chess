@@ -103,6 +103,59 @@ class RunCommandTests(unittest.TestCase):
         self.assertIn("CLOSED GPB0", output)
         self.assertIn("OPENED GPB0", output)
 
+    def test_reed_bank_test_parser_accepts_hexadecimal_addresses(self) -> None:
+        from chess_gantry.cli import _parser
+
+        args = _parser().parse_args(
+            [
+                "reed-bank-test",
+                "--first-address",
+                "0x20",
+                "--last-address",
+                "0x27",
+                "--samples",
+                "1",
+            ]
+        )
+        self.assertEqual(args.first_address, 0x20)
+        self.assertEqual(args.last_address, 0x27)
+
+    def test_vision_test_detects_demo_board_without_camera(self) -> None:
+        buffer = StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = run(
+                self.args(
+                    "vision-test",
+                    "--source",
+                    "demo:e2e4",
+                    "--frames",
+                    "2",
+                    "--interval",
+                    "0.001",
+                    "--stable-frames",
+                    "2",
+                )
+            )
+        self.assertEqual(code, 0)
+        self.assertIn('"last_move": "e2e4"', buffer.getvalue())
+
+    def test_vision_markers_generates_complete_pack(self) -> None:
+        output = Path(self._temporary.name) / "markers"
+        buffer = StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = run(
+                self.args(
+                    "vision-markers",
+                    "--output-dir",
+                    str(output),
+                    "--marker-pixels",
+                    "100",
+                )
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(list(output.glob("marker-*.png"))), 36)
+        self.assertTrue((output / "manifest.json").is_file())
+
     def test_workspace_test_dry_run_generates_full_grid(self) -> None:
         buffer = StringIO()
         with contextlib.redirect_stdout(buffer):

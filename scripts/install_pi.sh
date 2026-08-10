@@ -16,7 +16,12 @@ fi
 
 ARCH="$(uname -m)"
 case "$ARCH" in
-  aarch64 | armv7l | armv8l) ;;
+  aarch64 | arm64) ;;
+
+  armv7l | armv8l)
+    printf 'Chess Gantry vision requires a 64-bit Raspberry Pi OS (aarch64); found %s.\n' "$ARCH" >&2
+    exit 2
+    ;;
 
   *)
     printf 'Warning: expected a Raspberry Pi ARM architecture, found %s.\n' "$ARCH"
@@ -102,6 +107,6 @@ Dashboard address after run.sh starts:
   http://$LAN_IP/
 
 The current user was added to the docker and dialout groups. Log out and back in
-before using Docker without sudo. Export CLERK_PUBLISHABLE_KEY and optionally
-CLERK_SECRET_KEY before running run.sh if you do not use the values in that script.
+before using Docker without sudo. Export CLERK_PUBLISHABLE_KEY before running
+run.sh; the deployment script contains no built-in Clerk credentials.
 EOF

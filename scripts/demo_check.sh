@@ -31,5 +31,8 @@ uv run chess-gantry \
   --audit data/demo/audit.jsonl \
   board-sweep --feed-mm-min 1800 --magnet-on --confirm-motion --demo \
   --output data/demo/board-sweep.gcode
+uv run chess-gantry vision-test \
+  --source demo:e2e4 --frames 3 --stable-frames 3 --interval 0.01 \
+  > data/demo/vision-e2e4.json
 
-printf 'Demo readiness checks passed. No physical serial port was opened.\n'
+printf 'Demo readiness checks passed, including exact-piece vision. No physical serial port was opened.\n'

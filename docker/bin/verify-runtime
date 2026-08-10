@@ -27,6 +27,8 @@ REQUIRED = (
     "redis",
     "httpx",
     "requests",
+    "numpy",
+    "cv2",
     "chess_gantry.cli",
     "chess_gantry.clerk_auth",
     "chess_gantry.web_app",
@@ -36,6 +38,7 @@ REQUIRED = (
     "chess_gantry.lichess_follow",
     "chess_gantry.lichess_pgn",
     "chess_gantry.upstash_persistence",
+    "chess_gantry.vision",
     "chess_gantry.debug_console.server",
 )
 GPIO_MODULES = ("RPi.GPIO", "gpiozero", "smbus2", "spidev")
@@ -73,6 +76,17 @@ def main(argv: list) -> int:
         AppConfig.load(Path("/app/config.example.json"))
     except Exception as error:
         failures.append("AppConfig.load(config.example.json): " + repr(error))
+
+    try:
+        import cv2
+
+        if not hasattr(cv2, "aruco") or not hasattr(cv2.aruco, "ArucoDetector"):
+            failures.append("OpenCV does not provide ArUco detection")
+        build = cv2.getBuildInformation()
+        if "FFMPEG:                      YES" not in build:
+            failures.append("OpenCV was built without FFmpeg camera support")
+    except Exception as error:
+        failures.append("OpenCV vision verification: " + repr(error))
 
     if failures:
         for failure in failures:

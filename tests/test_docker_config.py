@@ -20,11 +20,13 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertIn('ENTRYPOINT ["/usr/bin/python3",', dockerfile)
         self.assertIn('test ! -e "${ROOTFS}/usr/bin/sh"', dockerfile)
 
-    def test_run_script_passes_devices_mounts_data_and_clerk_keys(self) -> None:
+    def test_run_script_passes_devices_mounts_data_and_clerk_key(self) -> None:
         script = (ROOT / "run.sh").read_text(encoding="utf-8")
         self.assertIn('--volume "$ROOT/config.json:/app/config.json:ro"', script)
         self.assertIn('--volume "$ROOT/data:/app/data"', script)
         self.assertIn("CLERK_PUBLISHABLE_KEY=$CLERK_PUBLISHABLE_KEY", script)
+        self.assertNotIn("CLERK_SECRET_KEY", script)
+        self.assertNotIn("sk_test_", script)
         self.assertIn('RUN_ARGS+=(--device "$SERIAL_DEVICE"', script)
         self.assertIn('RUN_ARGS+=(--device "$I2C_DEVICE")', script)
 
@@ -52,6 +54,7 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertIn('build -t "${CHESS_GANTRY_IMAGE:-chess:latest}"', script)
         self.assertIn("./run.sh", script)
         self.assertNotIn("docker-compose.pi.yml", script)
+        self.assertIn("vision requires a 64-bit Raspberry Pi OS", script)
 
     def test_run_script_builds_and_runs_the_image(self) -> None:
         script = (ROOT / "run.sh").read_text(encoding="utf-8")
@@ -73,6 +76,26 @@ class DockerConfigurationTests(unittest.TestCase):
     def test_image_dependency_set_includes_smbus2(self) -> None:
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn("smbus2", project)
+        self.assertIn("opencv-python-headless", project)
+        self.assertIn("numpy", project)
+
+    def test_distroless_image_verifies_vision_runtime(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        verifier = (ROOT / "docker" / "bin" / "verify-runtime").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("libstdc++ libgcc", dockerfile)
+        self.assertIn("CHESS_GANTRY_DISTROLESS=1", dockerfile)
+        self.assertIn('"cv2"', verifier)
+        self.assertIn("ArucoDetector", verifier)
+        self.assertIn("FFMPEG", verifier)
+
+    def test_run_script_supports_network_and_v4l2_cameras(self) -> None:
+        script = (ROOT / "run.sh").read_text(encoding="utf-8")
+        self.assertIn("CHESS_GANTRY_CAMERA_SOURCE", script)
+        self.assertIn("CHESS_GANTRY_VIDEO_DEVICE", script)
+        self.assertIn('--device "$VIDEO_DEVICE:/dev/video0"', script)
+        self.assertIn("CHESS_GANTRY_CAMERA_ENABLED=1", script)
 
     def test_dockerignore_excludes_large_local_directories(self) -> None:
         ignored = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
