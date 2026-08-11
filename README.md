@@ -1,537 +1,383 @@
-<p align="center">
-  <img src="./FullLogoWhite.webp" alt="Patch" width="210">
-</p>
-
+<p align="center"><img src="./FullLogoWhite.webp" alt="Patch" width="210"></p>
 <h1 align="center">Chess Gantry</h1>
-
+<p align="center"><strong>Phone camera to OpenAI Sol to legal chess to Lichess to physical Marlin motion.</strong></p>
 <p align="center">
-  <strong>A chessboard that sees the position, understands the move, and moves the pieces.</strong>
-</p>
-
-<p align="center">
-  Exact-piece overhead vision · Reed sensing · Collision-aware motion · Lichess · Marlin · Raspberry Pi
-</p>
-
-<p align="center">
-  <img alt="Python 3.9+" src="https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white">
+  <img alt="OpenAI Sol" src="https://img.shields.io/badge/Vision-gpt--5.6--sol-111827">
   <img alt="Raspberry Pi ARM64" src="https://img.shields.io/badge/Raspberry%20Pi-ARM64-C51A4A?logo=raspberrypi&logoColor=white">
-  <img alt="OpenCV ArUco" src="https://img.shields.io/badge/Vision-OpenCV%20ArUco-5C3EE8?logo=opencv&logoColor=white">
-  <img alt="Marlin" src="https://img.shields.io/badge/Firmware-Marlin-008080">
+  <img alt="Marlin" src="https://img.shields.io/badge/Motion-Marlin-008080">
   <img alt="Distroless" src="https://img.shields.io/badge/Runtime-FROM%20scratch-2496ED?logo=docker&logoColor=white">
 </p>
 
-<p align="center">
-  <a href="#five-minute-demo">Five-minute demo</a> ·
-  <a href="#vision">Vision</a> ·
-  <a href="#reed-switches">Reed switches</a> ·
-  <a href="#raspberry-pi">Raspberry Pi</a> ·
-  <a href="#commissioning">Commissioning</a> ·
-  <a href="#operation">Operation</a>
-</p>
-
----
-
-Chess Gantry converts legal chess moves into guarded Marlin G-code for a
-magnetic Cartesian gantry. It can observe a physical board, identify every
-tagged piece and square, infer a legal move, mirror or update a Lichess game, and
-move the corresponding piece.
+Chess Gantry observes one overhead physical board, transcribes all 64 squares
+with OpenAI `gpt-5.6-sol`, accepts only stable positions that match one legal
+move, and coordinates that move with local state, Lichess, and the magnetic
+gantry.
 
 ```mermaid
 flowchart LR
-  C[Overhead camera] --> V[Exact-piece vision]
-  R[Reed switches] --> F[Occupancy fusion]
-  V --> F
-  F --> L[Legal move engine]
-  L --> S[Local state and recovery journal]
-  L <--> H[Lichess]
-  S --> P[Collision-aware planner]
-  P --> M[Marlin controller]
-  M --> G[Magnetic gantry]
+  P[Phone 192.168.100.88] --> O[OpenCV camera transport]
+  O --> L[OpenAI Sol transcription]
+  L --> C[python-chess legality]
+  C --> G[Game coordinator]
+  G <--> H[Lichess]
+  G --> S[Atomic local state]
+  G --> M[Marlin and magnet]
 ```
-
-| Layer     | Current implementation                                               |
-| --------- | -------------------------------------------------------------------- |
-| Vision    | One overhead camera, 32 unique piece tags, 4 board-reference tags    |
-| Occupancy | Synthetic 8 x 8 matrix plus MCP23017 reed diagnostics                |
-| Rules     | `python-chess` legal move matching and FEN tracking                  |
-| Motion    | Collision-aware routes, bounded coordinates, Marlin acknowledgements |
-| State     | Atomic local JSON and append-only audit log                          |
-| Web       | Local operator dashboard; optional Clerk authentication              |
-| Runtime   | Fedora 42 builder, final `FROM scratch`, UID/GID 65532               |
 
 > [!WARNING]
-> This project moves real hardware and energizes an electromagnet. Keep an
-> independent physical cutoff within reach. Do not run physical commands until
-> endstops, direction, workspace, magnet electronics, and the complete path are
-> verified. Software safety checks do not replace safe mechanical and electrical
-> design.
+> This system moves hardware and energizes an electromagnet. Keep an independent
+> physical cutoff within reach. Camera recognition and software validation do
+> not replace correct endstops, wiring, flyback protection, calibration, and a
+> clear workspace.
 
-## Five-Minute Demo
+## Current Capabilities
 
-No controller, camera, Pi, reed switches, or motors are required.
+| Capability              | Status                                                      |
+| ----------------------- | ----------------------------------------------------------- |
+| Phone snapshot          | `snapshot:http://192.168.100.88:8080/shot.jpg` by default   |
+| Phone MJPEG source      | `http://192.168.100.88:8080/video` remains supported        |
+| Board recognition       | OpenAI `gpt-5.6-sol`, strict structured output              |
+| Move validation         | Two matching complete observations and one legal successor  |
+| Local two-player game   | Both people move pieces; Sol registers every move           |
+| Human versus Lichess/AI | Camera submits the local side; gantry executes remote side  |
+| Two-AI physical mirror  | Gantry executes both sides from a fresh Lichess game        |
+| Normal physical moves   | Supported with Marlin acknowledgements and local journaling |
+| Castling                | King and rook transfers supported                           |
+| Human captures          | Supported because the human removes the captured piece      |
+| Remote gantry captures  | Blocked until capture storage coordinates are calibrated    |
+| Promotion               | Blocked for physical replacement confirmation               |
 
-### Install
+Reed switches, MCP23017, synthetic occupancy, color caps, and ArUco markers have
+been removed. The only recognition source is Sol.
 
-Requirements: Python 3.9+, [`uv`](https://docs.astral.sh/uv/), Node.js, npm, and
-Git.
+## Why OpenCV Is Still Installed
+
+Sol receives images but does not open Linux cameras or network streams. OpenCV
+is retained only to:
+
+- open `/dev/video*`, MJPEG, RTSP, and other FFmpeg-backed sources;
+- decode repeated JPEG snapshots;
+- discard stale video buffers;
+- resize and JPEG-encode the newest frame;
+- serve the browser camera preview.
+
+OpenCV does not classify pieces or infer moves.
+
+## First Software Check
+
+Requirements: Python 3.10+, [`uv`](https://docs.astral.sh/uv/), Node.js, npm,
+and Git.
 
 ```bash
+git submodule update --init --recursive
 uv sync
 npm ci
-```
-
-### Verify Everything
-
-```bash
 ./scripts/demo_check.sh
 ```
 
-This runs the complete test and policy suite, plans `e2e4`, simulates motion and
-the magnet, renders a perspective-distorted tagged board, and detects the exact
-piece transition. It opens no serial, I2C, or camera device.
+The readiness script tests motion planning, persistence, serial protocol,
+firmware policy, the Sol schema, legal move inference, game routing, echo
+suppression, remote physical planning, and the web API without making paid OpenAI
+calls or moving real hardware.
 
-Expected final line:
+## Phone Camera
+
+The configured phone is:
 
 ```text
-Demo readiness checks passed, including exact-piece vision. No physical serial port was opened.
+IPv4 control page:  http://192.168.100.88:8080
+IPv4 HTTPS page:    https://192.168.100.88:8080
+IPv4 MJPEG:         http://192.168.100.88:8080/video
+IPv4 snapshot:      http://192.168.100.88:8080/shot.jpg
+IPv6 control page:  http://[2a01:b340:123:2e29:3257:6dc7:1e3b:cf57]:8080
 ```
 
-### Inspect Exact-Piece Vision
+Use IPv4 snapshot mode by default:
 
-Standard position:
+```text
+snapshot:http://192.168.100.88:8080/shot.jpg
+```
+
+The HTTPS endpoint may use a self-signed phone certificate that OpenCV or FFmpeg
+rejects, so plain HTTP on the trusted local LAN is the supported default. The
+IPv6 URL must retain square brackets around the address.
+
+The phone and gantry computer must be on the same non-isolated LAN. Keep the
+camera app open, use the rear normal lens, disable sleep, and mount the phone
+rigidly above the board. The board should fill most of the image with all four
+edges visible.
+
+The phone app must actively start its camera server. Merely opening the app is
+not enough. Its screen should show that the server is running on port 8080. If
+the dashboard reports `connection refused`, restart the server inside the phone
+app, keep it in the foreground, disable battery optimization, and verify the
+phone still owns `192.168.100.88`.
+
+Verify the snapshot:
 
 ```bash
-uv run chess-gantry vision-test \
-  --source demo --frames 3 --stable-frames 3 --interval 0.1
+curl -f http://192.168.100.88:8080/shot.jpg \
+  --output /tmp/chess-board.jpg
+file /tmp/chess-board.jpg
 ```
 
-Simulated `e2e4`:
+Or use the dashboard source probe without spending Sol tokens:
+
+```text
+Camera source: browser:http://192.168.100.88:8080
+Button: Test phone
+```
+
+Browser mode opens the phone's MJPEG stream directly in the browser, where native
+MJPEG playback is most reliable. Once per second a hidden canvas JPEG-encodes the
+same visible frame and uploads it to the local backend for calibration, plan
+view, Sol, legality, and game control. The phone receives exactly one client
+connection and Sol latency cannot freeze the broadcast.
+The UI reports the resolved endpoint, image dimensions, and latency. A historical
+cached image never counts as connected: the readiness strip requires a fresh
+frame less than three seconds old.
+
+MJPEG never finishes downloading, so a `curl` timeout after receiving bytes is
+normal. Test it through the application instead.
+
+## Credentials
+
+Sol recognition requires an OpenAI API key:
 
 ```bash
-uv run chess-gantry vision-test \
-  --source demo:e2e4 --frames 3 --stable-frames 3 --interval 0.1
+export OPENAI_API_KEY='your_openai_api_key'
 ```
 
-The accepted transition includes the permanent physical identity and both
-coordinate systems:
+For automatic local startup, create the ignored `.env.local` file:
+
+```bash
+install -m 600 /dev/null .env.local
+printf '%s\n' \
+  "OPENAI_API_KEY='your_openai_api_key'" \
+  "CHESS_GANTRY_CAMERA_SOURCE='snapshot:http://192.168.100.88:8080/shot.jpg'" \
+  > .env.local
+chmod 600 .env.local
+```
+
+Only `OPENAI_API_KEY`, `LICHESS_TOKEN`, `CLERK_PUBLISHABLE_KEY`, and
+`CHESS_GANTRY_CAMERA_SOURCE` are accepted from this file. Group/world-readable
+permissions are rejected. Existing exported variables take precedence.
+
+Use **Connect Lichess** in the dashboard for game modes. It opens Lichess's
+official OAuth Authorization Code flow with PKCE and requests only `board:play`.
+The account owner must approve access; the software cannot create a token without
+consent. The token remains in server memory and is never sent to JavaScript or
+stored in Git. `LICHESS_TOKEN` remains an optional server-side override.
+
+Open the dashboard at `http://127.0.0.1:8000` on the same computer when using
+**Connect Lichess**; the OAuth callback is deliberately loopback-only. When the
+dashboard runs on a remote Pi and the browser is on another computer, use a
+server-side `LICHESS_TOKEN` override or an HTTPS reverse proxy with an approved
+callback instead of weakening the callback check.
+
+## Test Sol Before Starting A Game
+
+Start with the higher-quality snapshot endpoint:
+
+```bash
+export OPENAI_API_KEY='your_openai_api_key'
+
+uv run chess-gantry vision-test \
+  --source 'snapshot:http://192.168.100.88:8080/shot.jpg' \
+  --orientation white_bottom \
+  --frames 1 \
+  --preview-output data/last-camera-frame.jpg
+```
+
+Expected output includes:
 
 ```json
 {
-  "uci": "e2e4",
-  "piece_id": "white_pawn_e",
-  "from": { "square": "e2", "coordinate": { "x": 4, "y": 1 } },
-  "to": { "square": "e4", "coordinate": { "x": 4, "y": 3 } }
+  "status": "complete",
+  "rows": {
+    "row_1": "rnbqkbnr",
+    "row_2": "pppppppp",
+    "row_3": "........",
+    "row_4": "........",
+    "row_5": "........",
+    "row_6": "........",
+    "row_7": "PPPPPPPP",
+    "row_8": "RNBQKBNR"
+  }
 }
 ```
 
-### Start The Demo Dashboard
+If Black is nearest the bottom of the phone image, use:
 
 ```bash
-./scripts/live_demo.sh
+--orientation black_bottom
 ```
 
-Open <http://127.0.0.1:8000>. In **Overhead exact-piece vision**, use `demo` or
-`demo:e2e4`. In **Synthetic 8 x 8 sensor lab**, run the built-in move datasets.
+`partial`, `unusable`, and `not_found` results are never converted into moves.
+Sol is instructed to return `x` for known occupancy with uncertain identity and
+`?` for uncertain occupancy rather than guessing.
 
-## Vision
+## Run The Full Web Software
 
-### Why Fiducials, Not Color Or A Generic CNN?
-
-Raw colors change with exposure, white balance, shadows, glare, printing, and
-JPEG compression. A generic chess CNN usually predicts a class such as “white
-rook”; it cannot distinguish the two physical white rooks and may fail when the
-board, pieces, lens, or lighting differs from its training set.
-
-Chess Gantry uses unique error-correcting ArUco MIP tags because they provide:
-
-- exact physical identity, not only color or class;
-- no model training or GPU requirement;
-- fast ARM64 inference with headless OpenCV;
-- perspective registration from four fixed references;
-- explicit rejection instead of an untrustworthy low-confidence guess.
-
-A future CNN can add secondary checks for hands, fallen pieces, or missing caps.
-It should not replace the authoritative identity channel without a board-specific
-dataset and independent accuracy validation.
-
-### What The Detector Guarantees
-
-Every status response examines all configured pieces and reports:
-
-| Field             | Example                                                    |
-| ----------------- | ---------------------------------------------------------- |
-| Physical identity | `white_pawn_e`                                             |
-| Marker            | `22`                                                       |
-| Type and color    | `white pawn`                                               |
-| Expected square   | `e2`                                                       |
-| Observed square   | `e4`                                                       |
-| Board coordinate  | `{x: 4, y: 3}` where `a1 = {0,0}`                          |
-| Camera cell       | `{row: 4, column: 4}` where image top-left is `a8`         |
-| State             | `matched`, `moved`, `missing`, `unexpected`, or `captured` |
-
-The detector accepts a move only when the same complete position appears for
-three frames and matches exactly one legal successor. It rejects missing
-references, invalid board geometry, unknown or duplicate IDs, small tags,
-off-board tags, two tags on one square, square-boundary placements, illegal
-positions, and occupancy disagreement.
-
-Hands and sleeves cause a waiting state. That is intentional: safe abstention is
-better than silently recording the wrong move.
-
-Supported transitions include normal moves, captures, en passant, castling, and
-promotion. A tag remains the same physical identity after promotion while its
-tracked type changes. Position alone cannot distinguish four promotion choices,
-so ambiguous promotion defaults to queen and records that policy.
-
-### Generate The Marker Set
+Local development or direct Pi run:
 
 ```bash
-uv run chess-gantry vision-markers \
-  --output-dir data/vision-markers \
-  --marker-pixels 600
+export OPENAI_API_KEY='your_openai_api_key'
+
+uv run chess-gantry --config config.json web
 ```
 
-Output:
-
-| IDs          | Use                          |
-| ------------ | ---------------------------- |
-| `0`          | Board top-left reference     |
-| `1`          | Board top-right reference    |
-| `2`          | Board bottom-right reference |
-| `3`          | Board bottom-left reference  |
-| `10` to `41` | The 32 exact starting pieces |
-
-`data/vision-markers/manifest.json` maps each piece ID to its marker. Print
-without interpolation, preserve the white border, and mount each piece marker
-horizontally on a flat, centered, matte cap. Do not bend tags over piece tops.
-
-### Camera Layout
+Open:
 
 ```text
-reference 0                                      reference 1
-                         camera
-                           |
-                           v
-                    a8 . . . . h8
-                    .           .
-                    .   board   .
-                    .           .
-                    a1 . . . . h1
-reference 3                                      reference 2
+http://127.0.0.1:8000
 ```
 
-Use one rigid camera directly above the board:
-
-- normal lens, not ultra-wide;
-- board fills roughly 70 to 85 percent of the image;
-- all four references remain visible;
-- 1440p or higher is preferred for small caps;
-- piece tags should appear at least 40 to 60 pixels wide;
-- diffuse symmetrical lighting and matte surfaces;
-- lock orientation, focus, exposure, white balance, and zoom when possible.
-
-The homography corrects moderate perspective. It cannot remove severe parallax
-from an angled camera or a tall off-center cap.
-
-### Test A Photo
-
-```bash
-uv run chess-gantry vision-test \
-  --source /path/to/board.jpg \
-  --frames 3 --stable-frames 3
-```
-
-A standard board should report `state: ready`, 32 observed pieces, no error, and
-a smallest marker comfortably above the 24-pixel rejection floor.
-
-### Use A Phone
-
-Run a LAN camera app on a phone mounted above the board. Use its actual MJPEG,
-RTSP, or JPEG endpoint, not the HTML landing page.
-
-MJPEG example:
-
-```bash
-uv run chess-gantry vision-test \
-  --source 'http://PHONE_IP:8080/video' \
-  --frames 30 --stable-frames 3 --interval 0.2
-```
-
-Snapshot endpoints are often sharper and less buffered:
-
-```bash
-uv run chess-gantry vision-test \
-  --source 'snapshot:http://PHONE_IP:8080/shot.jpg' \
-  --frames 10 --stable-frames 3 --interval 0.3
-```
-
-Keep the phone powered, disable sleep, and place it on the same non-isolated LAN
-as the Pi. In a container, `localhost` means the container, not the phone.
-
-#### Phone Camera In The Web UI
-
-1. Install an IP-camera app that exposes MJPEG, RTSP, or a JPEG snapshot.
-2. Select the rear normal-angle camera and at least 1080p, preferably 1440p.
-3. Mount the phone directly above the board and disable sleep.
-4. Confirm the URL opens from the gantry computer's browser. Typical endpoints
-   are `http://PHONE_IP:8080/video` and `http://PHONE_IP:8080/shot.jpg`.
-5. Start the local UI:
-
-```bash
-uv run chess-gantry --config config.demo.json web --demo
-```
-
-6. Open <http://127.0.0.1:8000> and find **Overhead board vision**.
-7. Enter either `http://PHONE_IP:8080/video` or
-   `snapshot:http://PHONE_IP:8080/shot.jpg`.
-8. Enable **Pink pawn · blue rook · green knight** and press **Start camera**.
-9. Press **Open camera window** to keep an annotated live view visible.
-
-The camera window draws the calibrated 8 x 8 grid, colored bounding boxes, piece
-types, and algebraic squares. The status list also reports board `{x,y}` and raw
-image coordinates.
-
-Color mapping:
-
-| Cap color | Classified type |
-| --------- | --------------- |
-| Pink      | Pawn            |
-| Blue      | Rook            |
-| Green     | Knight          |
-
-Color recognition still requires board-reference markers `0`, `1`, `2`, and
-`3`; only the piece markers are optional. Place those references around the
-board exactly as shown in the camera layout. Test without a phone first by using
-`demo-colors` as the camera source.
-
-CLI color test:
-
-```bash
-uv run chess-gantry vision-test \
-  --source 'snapshot:http://PHONE_IP:8080/shot.jpg' \
-  --colors --frames 10 --interval 0.3 \
-  --preview-output data/color-preview.jpg
-```
-
-Open `data/color-preview.jpg` to inspect the labels. The CLI JSON lists every
-recognized colored piece and square.
-
-> [!IMPORTANT]
-> Color identifies only the requested type. It does not identify side or a
-> permanent physical piece. A pink cap means “pawn on e4,” not necessarily
-> “White's original e-pawn.” Use unique ArUco piece tags for exact identity and
-> automatic Lichess or physical-board writes.
-
-### Use A USB Camera
-
-```bash
-ls -l /dev/video* 2> /dev/null
-uv run chess-gantry vision-test \
-  --source /dev/video0 --frames 30 --stable-frames 3
-```
-
-Raspberry Pi CSI cameras that expose only a libcamera pipeline must first be made
-available as a working V4L2 or network stream.
-
-### Acceptance Before Automatic Writes
-
-Before enabling Lichess or second-board writes, replay 500 to 1,000 real moves
-under varied lighting and include captures, castling, en passant, occlusion,
-hidden tags, boundary placements, camera movement, and network failure. Measure
-wrong commits separately from abstentions. The release criterion for automatic
-writes should be zero wrong commits.
-
-## Reed Switches
-
-Vision works independently while reed hardware is diagnosed. Keep the reed path:
-it provides lighting-free occupancy and becomes an independent veto when a full
-8 x 8 matrix is available.
-
-### Known Single-Pin Test
-
-Default wiring for an active-low normally open switch:
+The camera source is prefilled with:
 
 ```text
-Pi GPIO 2 / SDA  -> MCP23017 SDA
-Pi GPIO 3 / SCL  -> MCP23017 SCL
-Pi 3V3           -> MCP23017 VDD and RESET
-Pi GND           -> MCP23017 VSS and A0/A1/A2
-MCP23017 GPB0    -> reed switch -> GND
+snapshot:http://192.168.100.88:8080/shot.jpg
 ```
+
+In the UI:
+
+1. Start recognition and rotate the frame upright.
+2. Select which side is nearest the bottom.
+3. Press **Calibrate 4 corners** and click top-left, top-right, bottom-right, then
+   bottom-left. The software perspective-warps that shape to a square 1024×1024
+   board before Sol sees it.
+4. Wait for `complete`, `2 / 2`, and an exact standard-position match.
+5. Confirm every displayed square, grid coordinate, and machine millimeter value.
+6. Scan serial ports, select the CH340 device/baud, connect, and home.
+7. Use **Connect Lichess** for Lichess modes.
+8. Resolve any pending transaction before starting the full game.
+
+## Guided Hardware Setup
+
+The dashboard contains a **Hardware test matrix**. Run it in order after the
+phone board crop is calibrated.
+
+### Four Board Reference Points
+
+Start the phone camera, rotate it upright, then press **Calibrate 4 corners**.
+Click the visible playing-area corners in this exact order:
 
 ```text
-No magnet       OPEN / HIGH
-Magnet present  CLOSED / LOW
+1. top-left
+2. top-right
+3. bottom-right
+4. bottom-left
 ```
 
-Enable I2C and verify address `0x20`:
+Use **Raw frame** while clicking references. After calibration, use **Plan view**
+to inspect the authoritative 1024×1024 top-down board sent to Sol. The plan view
+must show a square board with straight file/rank boundaries and no surrounding
+table. If it does not, clear the crop and click the four playing-area corners
+again.
 
-```bash
-sudo raspi-config nonint do_i2c 0
-sudo reboot
-sudo apt install -y i2c-tools
-i2cdetect -y 1
-```
+Clicks are normalized to the actual visible image, excluding black letterbox
+bars. The four points must form a convex quadrilateral covering a meaningful
+part of the frame. OpenCV transforms it into a square 1024×1024 board before
+Sol receives it. Calibration is persisted under `data/` and cleared when the
+camera source or rotation changes.
 
-Run a ten-second GPB0 test:
+Camera capture and Sol inference run on separate threads. A slow Sol request no
+longer freezes the browser preview or camera reconnect loop. Status distinguishes
+phone capture failures from Sol API failures.
 
-```bash
-uv run chess-gantry reed-test \
-  --bus 1 --address 0x20 --samples 100 --interval 0.1
-```
+### Test Matrix
 
-### Diagnose Multiple Expanders
+1. **Diagnostics** sends only `M115`, `M119`, and `M114`. It requires Relay
+   Chess Gantry firmware, all three required endstop fields, and a parseable
+   position.
+2. **Endstops** takes another `M119` snapshot and verifies `x_min`, `y_max`, and
+   `z_max` are present.
+3. **Home** runs configured `G28 X Y Z`, waits, applies the measured reference,
+   and requires `M114` to match `X2 Y298 Z328` within 0.25 mm.
+4. **Move 5 mm** moves each logical gantry direction inward and back at 300
+   mm/min. It uses no `G92`, keeps `M211 S1`, keeps the magnet off, and verifies
+   return position.
+5. **Pulse magnet** energizes fan P0 for exactly one second and always attempts
+   magnet-off cleanup.
+6. **Visit centers** traverses all 64 measured square centers at 1800 mm/min
+   with the magnet off, then returns to the verified home coordinate and checks
+   `M114`.
 
-Discover `0x20` through `0x27` without writing configuration registers:
-
-```bash
-uv run chess-gantry reed-bank-test \
-  --bus 1 --first-address 0x20 --last-address 0x27 --samples 1
-```
-
-After `i2cdetect` confirms a specific address is a reed-only MCP23017, configure
-and watch all 16 pins on that device:
-
-```bash
-uv run chess-gantry reed-bank-test \
-  --bus 1 --first-address 0x20 --last-address 0x20 \
-  --configure-inputs --samples 100 --interval 0.1
-```
-
-> [!CAUTION]
-> `--configure-inputs` writes all GPA/GPB pins as pulled-up inputs. Never use it
-> on an unknown device or an MCP23017 that intentionally drives outputs.
-
-The report isolates address, bus, power, pull-up, pin, and switch failures. It
-does not invent a chess-square map. A full board map requires the real expander
-addresses, pin-to-square order, active levels, and wiring topology.
-
-### Fusion
-
-The conservative fusion rule is:
+Before any physical step, type:
 
 ```text
-vision occupancy == auxiliary 8 x 8 occupancy
-and exact identities match exactly one legal successor
+SETUP AREA CLEAR
 ```
 
-Disagreement produces `conflict`; neither source silently overrides the other.
-The dashboard currently uses the synthetic 8 x 8 matrix to exercise this logic
-until a verified physical 64-square mapping is supplied.
+**Run complete setup** performs the same six steps in sequence and stops on the
+first failure. A pending transaction blocks every actuator test. Rehoming
+invalidates movement, magnet, and center-test completion so they must be rerun.
 
-## Raspberry Pi
+Use the independent physical cutoff if anything moves incorrectly. The GUI
+emergency stop remains available throughout setup.
 
-### Requirements
+## Game Modes
 
-- Raspberry Pi with 64-bit ARM OS; 32-bit `armv7l` is rejected
-- Docker Engine
-- Optional Clerk development key for authenticated network access
-- Optional `/dev/ttyUSB0`, `/dev/i2c-1`, and `/dev/video*`
+### Two People On One Board
 
-### Install
-
-```bash
-sudo apt update
-sudo apt install -y git curl
-git clone --recurse-submodules https://github.com/odinglyn0/Chess.git
-cd Chess
-./scripts/install_pi.sh
-```
-
-If the installer enables I2C, reboot and rerun it.
-
-### Run
-
-No camera:
-
-```bash
-./run.sh
-```
-
-Phone camera:
-
-```bash
-CHESS_GANTRY_CAMERA_SOURCE='snapshot:http://PHONE_IP:8080/shot.jpg' ./run.sh
-```
-
-USB/V4L2 camera:
-
-```bash
-CHESS_GANTRY_VIDEO_DEVICE=/dev/video0 ./run.sh
-```
-
-Open the printed URL, normally `http://chess.local` or the Pi's LAN address.
-Control-C stops and removes the foreground container. Without Clerk, anyone who
-can reach that LAN address can control the gantry.
-
-`run.sh` builds the image, creates missing local state, mounts `config.json` and
-`data/`, attaches available serial/I2C/camera devices with their host groups,
-and starts simulated Marlin when no serial controller exists.
-
-Useful overrides:
-
-| Variable                     | Default        | Purpose                                  |
-| ---------------------------- | -------------- | ---------------------------------------- |
-| `CHESS_GANTRY_SERIAL_PORT`   | `/dev/ttyUSB0` | Marlin device                            |
-| `CHESS_GANTRY_I2C_DEVICE`    | `/dev/i2c-1`   | MCP23017 bus device                      |
-| `CHESS_GANTRY_CAMERA_SOURCE` | empty          | Network, RTSP, or `snapshot:` source     |
-| `CHESS_GANTRY_VIDEO_DEVICE`  | empty          | Host V4L2 device passed as `/dev/video0` |
-| `CHESS_GANTRY_HTTP_PORT`     | `80`           | Primary dashboard port                   |
-| `CHESS_GANTRY_MDNS_NAME`     | `chess.local`  | Advertised LAN name                      |
-
-Set only one camera variable.
-
-### Distroless Runtime
-
-The production image is built with Fedora 42 and finishes with `FROM scratch`.
-It contains Python, the application, OpenCV, runtime libraries, CA certificates,
-timezone data, and `curl` for health checks. It contains no shell, package
-manager, Node.js, compiler, or Git client and runs as UID/GID 65532.
-
-Inspect it from the host:
-
-```bash
-docker ps --filter name=chess-gantry
-docker logs -f chess-gantry
-docker inspect --format '{{.State.Health.Status}}' chess-gantry
-```
-
-### Update
-
-```bash
-git pull --ff-only
-git submodule update --init --recursive
-./run.sh
-```
-
-`config.json` and `data/` are preserved.
-
-## Commissioning
-
-Follow this order the first time hardware is connected. Do not skip to a chess
-move.
-
-### Machine Reference
-
-| Property                   | Value          |
-| -------------------------- | -------------- |
-| Inner gantry width         | 330 mm         |
-| Outer paired gantry height | 300 mm         |
-| Square spacing             | 40 mm          |
-| Nearest-home square        | h1             |
-| Nearest-home center        | `X2 Y298 Z320` |
-| Homed host reference       | `X2 Y298 Z328` |
+Select:
 
 ```text
-Physical X driver -> logical X -> x_min
-Physical Y driver -> logical Y -> y_max
-Physical E driver -> logical Z -> z_max
+Two people, one physical board
+```
+
+Both people move their own pieces. Sol registers every legal changed position.
+The gantry does not repeat those moves because they already happened physically.
+Human captures are supported when the player removes the captured piece.
+
+### Human Versus Lichess Or An AI
+
+1. Use **Connect Lichess** and approve `board:play`.
+2. Create a fresh Lichess Board API game with zero moves.
+3. Put the physical board in the standard position.
+4. Select **Camera player vs Lichess / AI**.
+5. Enter the game ID and select the camera-controlled side.
+6. Start before the first move.
+
+Flow:
+
+```text
+Human moves physically
+-> Sol observes the move twice
+-> python-chess validates it
+-> local physical state updates without gantry motion
+-> move is submitted once to Lichess
+-> Lichess echo is acknowledged without duplicate motion
+-> opponent/AI move arrives
+-> gantry homes/executes with Marlin acknowledgements
+-> camera rule state advances to the expected position
+```
+
+### Two AI Or Remote Players On The Physical Board
+
+Select:
+
+```text
+Mirror Lichess / two AI physically
+```
+
+Start with a fresh zero-move Lichess game. The gantry homes once and executes
+every move from the authenticated Board API stream for both sides. Camera
+inference is paused during gantry motion.
+
+## Physical Motion
+
+The physical E-driver motor is exposed by firmware as logical Z:
+
+```text
+Physical X driver -> Marlin X -> x_min
+Physical Y driver -> Marlin Y -> y_max
+Physical E driver -> Marlin Z -> z_max
 Physical Z driver -> unused
 Electromagnet     -> Marlin fan P0
 ```
 
-The physical E connector is intentionally logical Z. Host commands use X/Y/Z,
-never extrusion E. Configured homing performs:
+Configured homing:
 
 ```gcode
 G28 X Y Z
@@ -540,178 +386,40 @@ G92 X2 Y298 Z328
 M400
 ```
 
-Board corner centers:
-
-```text
-h1  X2   Y298 Z320
-a1  X2   Y298 Z40
-h8  X282 Y18  Z320
-a8  X282 Y18  Z40
-```
-
-> [!IMPORTANT]
-> `safety.home_before_execute` is false. Home explicitly after every boot,
-> controller reset, emergency stop, or lost position. `safety.calibrated: true`
-> reflects stored project measurements, not proof that repaired hardware is safe.
-
-### 1. Inspect Unpowered
-
-- Mechanics move freely and paired gantries are square.
-- Motors, switches, and physical-to-logical axis mapping match the table above.
-- Magnet driver has flyback protection and an independent cutoff.
-- No motor current passes through the Pi.
-- Grounds and cables are secure and cannot enter the travel path.
-
-### 2. Diagnose Without Motion
+Before a real game:
 
 ```bash
-uv run chess-gantry --config config.json ports
 uv run chess-gantry --config config.json diagnose
-uv run chess-gantry --config config.json endstop-watch
-uv run python scripts/check_firmware.py --config config.json
-```
 
-`diagnose` sends `M115`, `M119`, and `M114`; it does not move motors.
-
-### 3. Home With An Empty Path
-
-```bash
 uv run chess-gantry --config config.json home-gantry \
   --confirm-motion --confirm-clear-path
-```
 
-Expected host reference: `X2 Y298 Z328`.
-
-### 4. Test Motion With Magnet Off
-
-Print first:
-
-```bash
-uv run chess-gantry --config config.json motor-test \
-  --distance-mm 5 --feed-mm-min 300
-```
-
-Then execute the inspected program:
-
-```bash
 uv run chess-gantry --config config.json motor-test \
   --distance-mm 5 --feed-mm-min 300 --confirm-motion
 ```
 
-### 5. Test The Magnet Separately
+The game coordinator opens one persistent serial connection and homes on that
+same connection before executing remote moves. Every Marlin command must return
+`ok`; `M400` waits for queued motion to finish.
 
-```bash
-uv run chess-gantry --config config.json magnet-test \
-  --duration-s 1 --confirm-motion
-```
+If a CH340 `/dev/ttyUSB*` node disappears after opening, restore controller power
+and the USB data cable, then press **Scan ports**. The serial connector suppresses
+DTR/RTS reset, ignores motherboard serial ports when a likely USB controller is
+available, and waits for USB re-enumeration between 115200 and 250000 attempts.
+If no tty node returns, the remaining fault is below the application layer.
 
-The CLI limits a pulse to five seconds.
+## Pending Transaction Recovery
 
-### 6. Verify The Workspace
+This checkout currently may contain `data/pending_move.json`. The software will
+not start a game or physical move while that file exists.
 
-With no pieces or obstructions:
-
-```bash
-uv run chess-gantry --config config.json workspace-test \
-  --feed-mm-min 1200 \
-  --confirm-motion --confirm-empty-workspace --confirm-at-switches
-
-uv run chess-gantry --config config.json square-center-demo \
-  --feed-mm-min 1800 --dwell-ms 150 \
-  --confirm-motion --confirm-clear-workspace
-```
-
-Only after those pass should you run magnet-on demos. See exact flags with:
-
-```bash
-uv run chess-gantry piece-demo --help
-uv run chess-gantry circle-demo --help
-uv run chess-gantry board-sweep --help
-```
-
-### Emergency Stop
-
-Use the physical cutoff for immediate electrical isolation. The software stop is:
-
-```bash
-uv run chess-gantry --config config.json stop
-```
-
-This sends Marlin `M112`. Reset or power-cycle Marlin, diagnose again, and home
-before any further movement.
-
-## Operation
-
-### Dashboard
-
-Local hardware dashboard:
-
-```bash
-uv run chess-gantry --config config.json web
-```
-
-Trusted LAN:
-
-```bash
-./scripts/run_network_ui.sh
-```
-
-Local mode requires no account or environment variable. The LAN script
-explicitly enables unauthenticated network access, so every reachable user can
-control the gantry. Keep it on a trusted network and never expose it directly to
-the public internet.
-
-To require Clerk sign-in instead:
-
-```bash
-export CLERK_PUBLISHABLE_KEY='pk_test_your_real_key'
-uv run chess-gantry --config config.json web \
-  --host 0.0.0.0 --require-clerk --no-browser
-```
-
-Use a Clerk `pk_test_` instance over plain HTTP and restrict who may sign in.
-
-The dashboard owns one shared serial connection and provides position, jogging,
-homing, guarded demos, planning/execution, recovery, vision, synthetic occupancy,
-GPB0 state, Lichess, logs, cancellation, and emergency stop.
-
-### Plan And Execute One Move
-
-Planning is read-only:
-
-```bash
-uv run chess-gantry --config config.json \
-  plan examples/move_e2_e4.json --summary-json
-```
-
-For physical execution, verify the physical board matches the tracked state,
-home explicitly, inspect the plan, then execute:
-
-```bash
-uv run chess-gantry --config config.json home-gantry \
-  --confirm-motion --confirm-clear-path
-
-uv run chess-gantry --config config.json \
-  execute examples/move_e2_e4.json --confirm-motion
-```
-
-State commits only after every Marlin acknowledgement succeeds.
-
-### State And Recovery
-
-```text
-data/board_state.json   Last committed board state
-data/pending_move.json  Interrupted-move transaction journal
-data/audit.jsonl        Append-only operation history
-```
-
-Inspect a pending move:
+Inspect it:
 
 ```bash
 uv run chess-gantry --config config.json reconcile
 ```
 
-If the physical move completed exactly as shown:
+If the physical move completed exactly as recorded:
 
 ```bash
 uv run chess-gantry --config config.json reconcile \
@@ -725,98 +433,99 @@ uv run chess-gantry --config config.json reconcile \
   --discard --confirm-physical-state
 ```
 
-Never guess. Restore a known physical position when the result is uncertain.
+Never guess. Restore a known physical position if uncertain.
 
-Reset state only after physically arranging the standard position and stopping
-all movement/followers:
+## Raspberry Pi And Docker
+
+Install on a 64-bit Pi:
 
 ```bash
-uv run chess-gantry --config config.json \
-  reset-state --confirm-standard-position
+sudo apt update
+sudo apt install -y git curl
+git clone --recurse-submodules https://github.com/odinglyn0/Chess.git
+cd Chess
+./scripts/install_pi.sh
 ```
 
-### Lichess
-
-Public game dry run:
+Run the distroless image:
 
 ```bash
-./scripts/lichess_game.sh check GAME_ID
-./scripts/lichess_game.sh dry-run GAME_ID
-```
-
-Physical follow after commissioning and a standard-position reset:
-
-```bash
-./scripts/lichess_game.sh reset GAME_ID
-./scripts/lichess_game.sh play GAME_ID
-```
-
-For vision or synthetic-sensor writes, export a Board API token before starting
-the dashboard:
-
-```bash
-export LICHESS_TOKEN="lip_your_board_api_token"
+export OPENAI_API_KEY='your_openai_api_key'
 ./run.sh
 ```
 
-Then set the game ID and enable writes in the relevant dashboard panel. The
-token stays server-side. Each accepted vision transition is submitted at most
-once; an uncertain failure remains blocked until the remote game is checked and
-the operator requests one explicit retry.
+`run.sh` passes:
 
-> [!IMPORTANT]
-> Physical capture storage is disabled because no safe off-board coordinates are
-> calibrated. Physical followers stop before captures. Promotion requires
-> physical piece replacement.
+- `/dev/ttyUSB0` when available;
+- `/dev/video0` when `CHESS_GANTRY_VIDEO_DEVICE` is set;
+- the phone URL through `CHESS_GANTRY_CAMERA_SOURCE`;
+- the OpenAI credential only when exported;
+- an optional Lichess token override, otherwise dashboard OAuth;
+- `config.json` read-only and `data/` read-write.
 
-## Firmware
-
-Target: Creality 4.2.2, STM32F103RET6, PlatformIO environment
-`STM32F103RE_creality`.
-
-```text
-firmware/relay-chess-v422-stm32f103ret6.bin
-firmware/relay-chess-v422-stm32f103ret6.bin.sha256
-```
-
-Verify the artifact:
+Override the phone source:
 
 ```bash
-(cd firmware && sha256sum -c relay-chess-v422-stm32f103ret6.bin.sha256)
+CHESS_GANTRY_CAMERA_SOURCE='snapshot:http://192.168.100.88:8080/shot.jpg' \
+  ./run.sh
 ```
 
-Build after installing PlatformIO:
+The final image is `FROM scratch`, runs as UID/GID 65532, and has no shell or
+package manager. It contains OpenCV because camera stream decoding happens
+locally before images are sent to Sol.
+
+## Mechanical Limits
+
+| Property                   | Value          |
+| -------------------------- | -------------- |
+| Inner gantry width         | 330 mm         |
+| Outer paired gantry height | 300 mm         |
+| Square spacing             | 40 mm          |
+| Nearest-home square        | h1             |
+| Homed host reference       | `X2 Y298 Z328` |
+
+Physical captures by the gantry remain disabled because no safe off-board
+storage coordinates are calibrated. This is a mechanical limitation, not a
+vision limitation. Remote captures stop safely instead of dragging a captured
+piece into an unknown location.
+
+## Emergency Stop
+
+Use the independent physical cutoff first when immediate isolation is required.
 
 ```bash
-git submodule update --init --recursive
-./scripts/build_firmware.sh
+uv run chess-gantry --config config.json stop
 ```
 
-Installed firmware should identify as `Relay Chess Gantry`, report zero
-extruders, and enable `EMERGENCY_PARSER` and `QUICK_HOME`. Heaters, bed, hotend,
-extrusion behavior, and BLTouch are disabled.
+This sends Marlin `M112`. Reset or power-cycle the controller, reconnect,
+diagnose, and home before continuing.
 
-The repository does not automate flashing. Verify the exact controller and MCU,
-then use the manufacturer's supported Marlin procedure.
+## Recover A Failed Home
 
-## Troubleshooting
+If the dashboard reports `Homing Failed`, `Printer halted`, or the CH340 tty
+device disappears:
 
-| Symptom                      | First action                                                         |
-| ---------------------------- | -------------------------------------------------------------------- |
-| Pending-move error           | Run `uv run chess-gantry --config config.json reconcile`             |
-| Dashboard refuses LAN bind   | Use `run_network_ui.sh`, `--allow-network`, or `--require-clerk`     |
-| `chess.local` fails          | Use the printed numeric Pi IP                                        |
-| Serial missing               | Run `ls -l /dev/ttyUSB* /dev/ttyACM*` and `chess-gantry ports`       |
-| Container enters demo mode   | Set `CHESS_GANTRY_SERIAL_PORT` to the actual device                  |
-| I2C missing                  | Check `/dev/i2c-1`, `i2cdetect -y 1`, RESET, 3.3 V, and ground       |
-| Reed pins do not change      | Use read-only bank discovery, then one confirmed expander test       |
-| Vision misses tags           | Increase resolution/tag size; fix focus, glare, angle, and occlusion |
-| Vision says `conflict`       | Compare every observed piece and the auxiliary occupancy matrix      |
-| Position or motion is wrong  | Stop; verify mapping, `M119`, firmware, home, and `config.json`      |
-| Capture/promotion stops play | Expected until storage/replacement is physically calibrated          |
+1. Use the physical cutoff and stop all motion.
+2. Inspect all three endstop switches and wiring. Before homing, `M119` may show
+   them open; each must reliably change to triggered when pressed by hand.
+3. Verify no axis is mechanically jammed or already pressing past a switch.
+4. Power-cycle the Marlin controller. Software cannot clear Marlin `kill()` by
+   reopening a missing tty node.
+5. Reseat the USB data cable and wait for:
 
-Only one dashboard, follower, debug console, or physical CLI process may own the
-serial port at a time.
+```bash
+ls -l /dev/ttyUSB* /dev/serial/by-id/*
+```
+
+6. In the dashboard press **Scan ports**, connect the stable by-id device at
+   115200, then run only **Diagnostics** and **Endstops**.
+7. Press each endstop by hand and confirm its `M119` state changes before
+   attempting Home again.
+8. Clear the entire homing path, keep the cutoff ready, type
+   `SETUP AREA CLEAR`, and run Home once.
+
+Do not run movement, magnet, center, or game tests after a failed home. They stay
+locked until strict post-home `M114` verification passes.
 
 ## Development
 
@@ -827,27 +536,19 @@ npm ci
 npm run check
 ```
 
-Apply formatting:
-
-```bash
-npm run format
-```
-
-Show authoritative CLI help:
+Show command help:
 
 ```bash
 uv run chess-gantry --help
-uv run chess-gantry COMMAND --help
+uv run chess-gantry vision-test --help
+uv run chess-gantry web --help
 ```
 
-The suite covers geometry, path planning, persistence, serial acknowledgements,
-firmware configuration, distroless deployment, optional Clerk authentication, dashboard
-ownership, reed diagnostics, exact-piece vision, perspective distortion,
-captures, castling, promotion, fusion vetoes, camera lifecycle, and guarded
-Lichess submission.
+The automated suite uses fake Sol and Lichess clients, so CI does not spend API
+credits or manipulate a live game. A real full-game test additionally requires
+`OPENAI_API_KEY`, `LICHESS_TOKEN`, the reachable phone, the Pi, Marlin, and the
+physical board.
 
 ---
 
-<p align="center">
-  Built at <strong>Patch</strong> by Basil Amin, Ben Hewston, Kelvin Gao, and Odin Glynn.
-</p>
+<p align="center">Built at <strong>Patch</strong> by Basil Amin, Ben Hewston, Kelvin Gao, and Odin Glynn.</p>

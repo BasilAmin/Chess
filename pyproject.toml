@@ -7,15 +7,17 @@ name = "chess-gantry"
 version = "0.2.0"
 description = "JSON-to-G-code framework for a Raspberry Pi chess gantry using Marlin over serial"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
   "pyserial>=3.5,<4",
   "chess>=1.11.2,<2",
   "berserk>=0.13.2,<1",
   "pyjwt[crypto]>=2.10,<3",
-  "smbus2>=0.5,<1",
   "opencv-python-headless>=4.13,<4.14",
   "numpy>=2,<3",
+  "openai>=2.53,<3",
+  "pydantic>=2.12,<3",
+  "httpx>=0.28,<1",
 ]
 
 [project.scripts]

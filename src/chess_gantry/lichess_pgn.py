@@ -42,6 +42,88 @@ def fetch_pgn(game_id: str, *, token: Optional[str] = None, client: Any = None) 
     return pgn
 
 
+def chess_move_deltas(
+    board: Any,
+    move: Any,
+    state: BoardState,
+    event_id: str,
+) -> tuple[MoveDelta, ...]:
+    import chess
+
+    if move not in board.legal_moves:
+        raise ValidationError(f"move {move.uci()} is illegal in the current position")
+    if move.promotion is not None:
+        raise ValidationError("promotion requires verified physical piece replacement")
+    rank = chess.square_rank(move.from_square)
+    if board.is_castling(move):
+        kingside = board.is_kingside_castling(move)
+        king_source = GridPosition(chess.square_file(move.from_square), rank)
+        king_destination = GridPosition(6 if kingside else 2, rank)
+        rook_source = GridPosition(7 if kingside else 0, rank)
+        rook_destination = GridPosition(5 if kingside else 3, rank)
+        king = state.piece_at(king_source)
+        rook = state.piece_at(rook_source)
+        if king is None or rook is None:
+            raise ValidationError("physical state is missing the castling king or rook")
+        return (
+            MoveDelta.from_mapping(
+                {
+                    "event_id": f"{event_id}.king",
+                    "position": king.piece_id,
+                    "px": king_source.x,
+                    "py": king_source.y,
+                    "nx": king_destination.x,
+                    "ny": king_destination.y,
+                }
+            ),
+            MoveDelta.from_mapping(
+                {
+                    "event_id": f"{event_id}.rook",
+                    "position": rook.piece_id,
+                    "px": rook_source.x,
+                    "py": rook_source.y,
+                    "nx": rook_destination.x,
+                    "ny": rook_destination.y,
+                }
+            ),
+        )
+    source = GridPosition(chess.square_file(move.from_square), rank)
+    destination = GridPosition(
+        chess.square_file(move.to_square), chess.square_rank(move.to_square)
+    )
+    moving = state.piece_at(source)
+    if moving is None:
+        raise ValidationError(
+            f"physical state has no piece at {chess.square_name(move.from_square)}"
+        )
+    payload: dict[str, Any] = {
+        "event_id": event_id,
+        "position": moving.piece_id,
+        "px": source.x,
+        "py": source.y,
+        "nx": destination.x,
+        "ny": destination.y,
+    }
+    if board.is_capture(move):
+        capture_square = (
+            chess.square(chess.square_file(move.to_square), rank)
+            if board.is_en_passant(move)
+            else move.to_square
+        )
+        capture_position = GridPosition(
+            chess.square_file(capture_square), chess.square_rank(capture_square)
+        )
+        captured = state.piece_at(capture_position)
+        if captured is None:
+            raise ValidationError("physical state is missing the captured piece")
+        payload["capture"] = {
+            "id": captured.piece_id,
+            "x": capture_position.x,
+            "y": capture_position.y,
+        }
+    return (MoveDelta.from_mapping(payload),)
+
+
 def pgn_moves(game_id: str, pgn_text: str, state: BoardState) -> Iterator[MoveDelta]:
     try:
         import chess

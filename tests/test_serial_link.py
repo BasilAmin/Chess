@@ -20,6 +20,8 @@ class FakeSerial:
         self.closed = False
         self.is_open = True
         self.kwargs = kwargs
+        self.dtr = True
+        self.rts = True
 
     def write(self, payload):
         self.writes.append(payload)
@@ -39,6 +41,9 @@ class FakeSerial:
     def close(self):
         self.closed = True
         self.is_open = False
+
+    def open(self):
+        self.is_open = True
 
 
 @dataclass
@@ -134,6 +139,17 @@ class SerialLinkTests(unittest.TestCase):
         )
         self.assertTrue(ports[0].likely_printer)
         self.assertNotIn("/dev/rfcomm0", [item.device for item in ports])
+
+    def test_auto_candidates_ignore_builtin_ports_when_usb_exists(self) -> None:
+        link = MarlinSerial(
+            self.settings(port="auto"),
+            serial_factory=lambda **kwargs: FakeSerial(**kwargs),
+            port_provider=lambda: [
+                FakePort("/dev/ttyS0", "Built-in serial"),
+                FakePort("/dev/ttyUSB0", "CH340 USB serial"),
+            ],
+        )
+        self.assertEqual(link._candidate_ports(), ("/dev/ttyUSB0",))
 
     def test_auto_connect_tries_fallback_baud_and_verifies_marlin(self) -> None:
         opened = []

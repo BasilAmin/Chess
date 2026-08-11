@@ -41,7 +41,7 @@ read_env() {
 }
 
 note "Host group IDs for the passed-through devices:"
-for entry in "DIALOUT_GID dialout 20" "GPIO_GID gpio 993" "I2C_GID i2c 994" "SPI_GID spi 995"; do
+for entry in "DIALOUT_GID dialout 20" "GPIO_GID gpio 993" "SPI_GID spi 995"; do
   set -- $entry
   key="$1"
   group="$2"
@@ -61,7 +61,6 @@ for device in \
   "$marlin" \
   "$(read_env GPIO_MEM_DEVICE /dev/gpiomem)" \
   "$(read_env GPIO_CHIP_DEVICE /dev/gpiochip0)" \
-  "$(read_env I2C_DEVICE /dev/i2c-1)" \
   "$(read_env SPI_DEVICE_0 /dev/spidev0.0)" \
   "$(read_env SPI_DEVICE_1 /dev/spidev0.1)"; do
   if [[ -e $device ]]; then
@@ -71,15 +70,6 @@ for device in \
   fi
 done
 
-if [[ ! -e /dev/i2c-1 ]]; then
-  note "  enable I2C with 'dtparam=i2c_arm=on' in /boot/firmware/config.txt, then reboot"
-elif command -v i2cdetect > /dev/null 2>&1; then
-  if i2cdetect -y 1 | grep -qE '(^|[[:space:]])20([[:space:]]|$)'; then
-    note "  MCP23017 detected at I2C address 0x20"
-  else
-    warn "no MCP23017 detected at address 0x20 on /dev/i2c-1"
-  fi
-fi
 if [[ ! -e /dev/spidev0.0 ]]; then
   note "  enable SPI with 'dtparam=spi=on' in /boot/firmware/config.txt, then reboot"
 fi

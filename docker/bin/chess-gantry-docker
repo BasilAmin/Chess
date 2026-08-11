@@ -13,7 +13,6 @@ DEVICE_REPORT = (
     ("Marlin serial", os.environ.get("CHESS_GANTRY_SERIAL_PORT", "/dev/ttyUSB0")),
     ("GPIO (sysfs/mem)", "/dev/gpiomem"),
     ("GPIO (character dev)", "/dev/gpiochip0"),
-    ("I2C bus 1", "/dev/i2c-1"),
     ("SPI 0.0", "/dev/spidev0.0"),
     ("SPI 0.1", "/dev/spidev0.1"),
     ("USB bus", "/dev/bus/usb"),
@@ -36,6 +35,9 @@ def _log(message: str) -> None:
 
 def _report_devices() -> None:
     for label, path in DEVICE_REPORT:
+        if "://" in path or path.startswith("snapshot:"):
+            _log("configured " + label + " source " + path)
+            continue
         node = Path(path)
         if not node.exists():
             _log("missing " + label + " at " + path)

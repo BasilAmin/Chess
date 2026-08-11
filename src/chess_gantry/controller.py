@@ -16,6 +16,7 @@ from .errors import (
 )
 from .models import MachinePoint, MoveDelta
 from .serial_link import DemoMarlinSerial, MarlinSerial, PortInfo, discover_serial_ports
+from .serial_link import parse_endstop_states
 from .service import GantryService, MotionPlan
 
 
@@ -98,6 +99,42 @@ class GantryController:
         self._position: Optional[MachinePoint] = None
         self._machine_position: Optional[tuple[float, float, float]] = None
         self._last_error: Optional[str] = None
+        self._setup = {
+            "diagnostics": False,
+            "endstops": False,
+            "homed": False,
+            "movement": False,
+            "magnet": False,
+            "centers": False,
+            "last_step": None,
+            "last_error": None,
+            "results": {},
+        }
+
+    def _reset_setup(self) -> None:
+        self._setup = {
+            "diagnostics": False,
+            "endstops": False,
+            "homed": False,
+            "movement": False,
+            "magnet": False,
+            "centers": False,
+            "last_step": None,
+            "last_error": None,
+            "results": {},
+        }
+
+    def _setup_result(self, step: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        self._setup[step] = True
+        self._setup["last_step"] = step
+        self._setup["last_error"] = None
+        self._setup["results"][step] = dict(payload)
+        return self.status()
+
+    def _setup_failure(self, step: str, exc: Exception) -> None:
+        self._setup["last_step"] = step
+        self._setup["last_error"] = str(exc)
+        self._last_error = str(exc)
 
     @property
     def connected(self) -> bool:
@@ -151,6 +188,7 @@ class GantryController:
             "board_revision": revision,
             "last_error": self._last_error,
             "demo": self.demo,
+            "setup": dict(self._setup),
         }
 
     def connect(
@@ -184,6 +222,7 @@ class GantryController:
             self._position = None
             self._machine_position = None
             self._last_error = None
+            self._reset_setup()
             return self.status()
 
     def disconnect(self) -> dict[str, Any]:
@@ -195,6 +234,7 @@ class GantryController:
             self._homed = False
             self._position = None
             self._machine_position = None
+            self._reset_setup()
             return self.status()
 
     def _require_link(self) -> Any:
@@ -273,6 +313,59 @@ class GantryController:
             result = self._require_link().send_command("M119", timeout_s=10.0)
             return result.responses
 
+    def run_setup_diagnostics(self) -> dict[str, Any]:
+        with self._operation_lock:
+            link = self._require_link()
+            try:
+                firmware = link.send_command("M115", timeout_s=10.0)
+                identity = " | ".join(firmware.responses)
+                if not self.demo and "relay chess gantry" not in identity.lower():
+                    raise ConfigurationError(
+                        "M115 did not identify the Relay Chess Gantry firmware"
+                    )
+                endstop_result = link.send_command("M119", timeout_s=10.0)
+                states = parse_endstop_states(endstop_result.responses)
+                required = ("x_min", "y_max", "z_max")
+                missing = [name for name in required if name not in states]
+                if missing:
+                    raise ConfigurationError(
+                        "M119 did not report required endstops: " + ", ".join(missing)
+                    )
+                position_result = link.send_command("M114", timeout_s=10.0)
+                if self._update_position(position_result.responses) is None:
+                    raise SerialProtocolError(
+                        "M114 did not return a parseable X/Y/Z position"
+                    )
+                return self._setup_result(
+                    "diagnostics",
+                    {
+                        "firmware": identity,
+                        "endstops": states,
+                        "position": self.status()["machine_position_mm"],
+                    },
+                )
+            except Exception as exc:
+                self._setup_failure("diagnostics", exc)
+                raise
+
+    def verify_setup_endstops(self) -> dict[str, Any]:
+        with self._operation_lock:
+            if not self._setup["diagnostics"]:
+                raise ConfigurationError("run diagnostics before the endstop test")
+            try:
+                result = self._require_link().send_command("M119", timeout_s=10.0)
+                states = parse_endstop_states(result.responses)
+                required = ("x_min", "y_max", "z_max")
+                missing = [name for name in required if name not in states]
+                if missing:
+                    raise ConfigurationError(
+                        "M119 did not report required endstops: " + ", ".join(missing)
+                    )
+                return self._setup_result("endstops", {"states": states})
+            except Exception as exc:
+                self._setup_failure("endstops", exc)
+                raise
+
     def _resolve_raw_timeout(self, timeout_s: Optional[float]) -> Optional[float]:
         if timeout_s is None:
             return None
@@ -334,16 +427,42 @@ class GantryController:
 
     def home_xy(self) -> dict[str, Any]:
         with self._operation_lock:
+            if self.service.journal.exists():
+                raise PendingTransactionError(
+                    f"pending transaction exists at {self.service.journal.path}; reconcile it first"
+                )
             link = self._require_link()
-            self.service.home_with_link(link)
-            self._homed = True
             try:
+                self.service.home_with_link(link)
                 result = link.send_command("M114", timeout_s=10.0)
-                self._update_position(result.responses)
-            except Exception:
-                self._position = MachinePoint(0.0, 0.0)
-            self._last_error = None
-            return self.status()
+                if self._update_position(result.responses) is None:
+                    raise SerialProtocolError(
+                        "M114 did not return a parseable position after homing"
+                    )
+                expected = (2.0, 298.0, 328.0)
+                assert self._machine_position is not None
+                if any(
+                    abs(actual - target) > 0.25
+                    for actual, target in zip(self._machine_position, expected)
+                ):
+                    raise ConfigurationError(
+                        "post-home M114 does not match X2 Y298 Z328 within 0.25 mm"
+                    )
+                self._homed = True
+                self._setup["movement"] = False
+                self._setup["magnet"] = False
+                self._setup["centers"] = False
+                self._last_error = None
+                return self._setup_result(
+                    "homed",
+                    {"machine_position_mm": self.status()["machine_position_mm"]},
+                )
+            except Exception as exc:
+                self._homed = False
+                self._position = None
+                self._machine_position = None
+                self._setup_failure("homed", exc)
+                raise
 
     def move_to_mm(
         self,
@@ -398,6 +517,155 @@ class GantryController:
                 pass
             self._last_error = None
             return self.status()
+
+    def run_setup_movement_test(
+        self, *, distance_mm: float = 5.0, feed_mm_min: float = 300.0
+    ) -> dict[str, Any]:
+        if distance_mm != 5.0 or feed_mm_min != 300.0:
+            raise ValidationError("setup movement test is fixed at 5 mm and 300 mm/min")
+        with self._operation_lock:
+            if self.service.journal.exists():
+                raise PendingTransactionError("resolve the pending transaction first")
+            if not self._setup["homed"] or not self._homed:
+                raise ConfigurationError(
+                    "complete verified homing before movement test"
+                )
+            link = self._require_link()
+            start = self._machine_position
+            if start is None:
+                raise ConfigurationError("verified home position is unavailable")
+            program = (
+                *self.config.magnet.off_commands,
+                "G21",
+                "G90",
+                "M211 S1",
+                "G1 X2 Y298 Z323 F300",
+                "M400",
+                "G1 X2 Y298 Z328 F300",
+                "M400",
+                "G1 X7 Y293 Z328 F300",
+                "M400",
+                "G1 X2 Y298 Z328 F300",
+                "M400",
+            )
+            try:
+                link.send_program(program)
+                result = link.send_command("M114", timeout_s=10.0)
+                if self._update_position(result.responses) is None:
+                    raise SerialProtocolError(
+                        "M114 did not verify movement-test return"
+                    )
+                assert self._machine_position is not None
+                if any(
+                    abs(actual - target) > 0.25
+                    for actual, target in zip(self._machine_position, start)
+                ):
+                    raise ConfigurationError(
+                        "movement test did not return to verified home within 0.25 mm"
+                    )
+                return self._setup_result(
+                    "movement", {"distance_mm": 5.0, "program": list(program)}
+                )
+            except BaseException as exc:
+                link.best_effort((*self.config.magnet.off_commands, "M84"))
+                self._homed = False
+                self._setup_failure("movement", exc)
+                raise
+
+    def run_setup_magnet_test(self) -> dict[str, Any]:
+        with self._operation_lock:
+            if self.service.journal.exists():
+                raise PendingTransactionError("resolve the pending transaction first")
+            if not self._setup["movement"]:
+                raise ConfigurationError("complete the 5 mm movement test first")
+            link = self._require_link()
+            program = self.service.magnet_test_program(1.0)
+            try:
+                link.send_program(program)
+                return self._setup_result(
+                    "magnet", {"duration_s": 1.0, "program": list(program)}
+                )
+            except BaseException as exc:
+                link.best_effort(self.config.magnet.off_commands)
+                self._setup_failure("magnet", exc)
+                raise
+
+    def run_setup_square_centers(
+        self, *, feed_mm_min: float = 1800.0, dwell_ms: int = 150
+    ) -> dict[str, Any]:
+        from .kinematics import grid_to_machine
+        from .models import GridPosition
+
+        if feed_mm_min != 1800.0 or dwell_ms != 150:
+            raise ValidationError("setup center test uses fixed 1800 mm/min and 150 ms")
+        with self._operation_lock:
+            if self.service.journal.exists():
+                raise PendingTransactionError("resolve the pending transaction first")
+            if not self._setup["movement"] or not self._homed:
+                raise ConfigurationError(
+                    "complete verified homing and movement test first"
+                )
+            link = self._require_link()
+            points = []
+            for y in range(self.config.board.height):
+                columns = (
+                    range(self.config.board.width - 1, -1, -1)
+                    if y % 2 == 0
+                    else range(self.config.board.width)
+                )
+                points.extend(
+                    grid_to_machine(GridPosition(x, y), self.config.board)
+                    for x in columns
+                )
+            mirror = self.config.workspace.min_y_mm + self.config.workspace.max_y_mm
+            program = [*self.config.magnet.off_commands, "G21", "G90", "M211 S1"]
+            for point in points:
+                program.extend(
+                    (
+                        f"G1 X{mirror - point.y:.3f} Y{point.y:.3f} Z{point.x:.3f} F1800",
+                        "M400",
+                        "G4 P150",
+                    )
+                )
+            program.extend(
+                (
+                    *self.config.magnet.off_commands,
+                    "G1 X2.000 Y298.000 Z328.000 F1800",
+                    "M400",
+                )
+            )
+            try:
+                link.send_program(tuple(program))
+                result = link.send_command("M114", timeout_s=10.0)
+                if self._update_position(result.responses) is None:
+                    raise SerialProtocolError("M114 did not verify center-test return")
+                assert self._machine_position is not None
+                if any(
+                    abs(actual - target) > 0.25
+                    for actual, target in zip(
+                        self._machine_position, (2.0, 298.0, 328.0)
+                    )
+                ):
+                    raise ConfigurationError(
+                        "center test did not return to verified home within 0.25 mm"
+                    )
+                return self._setup_result(
+                    "centers", {"square_count": len(points), "magnet": "off"}
+                )
+            except BaseException as exc:
+                link.best_effort((*self.config.magnet.off_commands, "M84"))
+                self._homed = False
+                self._setup_failure("centers", exc)
+                raise
+
+    def run_setup_combined(self) -> dict[str, Any]:
+        self.run_setup_diagnostics()
+        self.verify_setup_endstops()
+        self.home_xy()
+        self.run_setup_movement_test()
+        self.run_setup_magnet_test()
+        self.run_setup_square_centers()
+        return self.status()
 
     def _move_from_mapping(self, raw_move: Mapping[str, Any]) -> MoveDelta:
         return MoveDelta.from_mapping(
@@ -461,6 +729,8 @@ class GantryController:
                 self._link = None
                 self._homed = False
                 self._position = None
+                self._machine_position = None
+                self._reset_setup()
                 self._last_error = (
                     "Emergency stop sent. Reset or power-cycle the controller, "
                     "then reconnect and re-home."
