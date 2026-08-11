@@ -2,239 +2,325 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import time
+from types import SimpleNamespace
+import base64
 import unittest
 
 import chess
+from pydantic import ValidationError as PydanticValidationError
 
-from chess_gantry.board_sensor import board_matrix
 from chess_gantry.errors import ValidationError
 from chess_gantry.vision import (
-    VisionBoardTracker,
-    VisionManager,
-    generate_marker_pack,
-    marker_manifest,
-    synthetic_board_frame,
+    BoardTranscription,
+    SolTranscriber,
+    SolVisionManager,
+    board_payload,
+    board_symbols,
+    canonical_rows,
+    image_rows_to_board,
+    image_cell_to_square,
+    infer_legal_move,
+    rotate_image_cell,
+    square_to_image_cell,
+    validate_calibration,
+    warp_board_frame,
 )
 
 
-class VisionTests(unittest.TestCase):
-    def test_manifest_assigns_unique_ids_to_all_standard_pieces(self) -> None:
-        manifest = marker_manifest()
-        pieces = manifest["pieces"]
-        self.assertEqual(len(pieces), 32)
-        self.assertEqual(len({value["piece_id"] for value in pieces.values()}), 32)
-        self.assertEqual(manifest["board_reference_markers"]["0"], "top-left")
-
-    def test_generated_markers_are_detectable_and_include_manifest(self) -> None:
-        with TemporaryDirectory() as temporary:
-            output = Path(temporary)
-            generate_marker_pack(output, marker_pixels=100)
-            self.assertEqual(len(list(output.glob("marker-*.png"))), 36)
-            self.assertTrue((output / "manifest.json").is_file())
-
-    def test_standard_and_perspective_frames_detect_every_piece(self) -> None:
-        for perspective in (False, True):
-            tracker = VisionBoardTracker(stable_frames=2)
-            frame = synthetic_board_frame(perspective=perspective)
-            tracker.process_frame(frame)
-            result = tracker.process_frame(frame)
-            self.assertEqual(result["state"], "ready")
-            self.assertEqual(result["observed_piece_count"], 32)
-            self.assertEqual(result["piece_disagreements"], 0)
-            self.assertEqual(len(result["piece_comparison"]), 32)
-            self.assertLess(result["reference_error"], 0.01)
-            self.assertGreater(result["board_area_ratio"], 0.4)
-            self.assertGreater(result["smallest_marker_px"], 35)
-            pawn = next(
-                value
-                for value in result["piece_comparison"]
-                if value["piece_id"] == "white_pawn_e"
-            )
-            self.assertEqual(pawn["observed_square"], "e2")
-            self.assertEqual(pawn["observed_coordinate"], {"x": 4, "y": 1})
-            self.assertEqual(pawn["camera_cell"], {"row": 6, "column": 4})
-            self.assertEqual(pawn["state"], "matched")
-
-    def test_exact_piece_move_and_capture_are_inferred(self) -> None:
-        tracker = VisionBoardTracker(stable_frames=1)
-        tracker.process_frame(synthetic_board_frame())
-        first = tracker.process_frame(synthetic_board_frame(moves=("e2e4",)))
-        self.assertEqual(first["last_move"], "e2e4")
-        self.assertEqual(first["last_move_detail"]["piece_id"], "white_pawn_e")
-        self.assertEqual(first["last_move_detail"]["from"]["square"], "e2")
-        self.assertEqual(
-            first["last_move_detail"]["from"]["coordinate"], {"x": 4, "y": 1}
-        )
-        self.assertEqual(first["last_move_detail"]["to"]["square"], "e4")
-        self.assertEqual(
-            first["last_move_detail"]["to"]["coordinate"], {"x": 4, "y": 3}
-        )
-        second = tracker.process_frame(synthetic_board_frame(moves=("e2e4", "d7d5")))
-        self.assertEqual(second["last_move"], "d7d5")
-        capture = tracker.process_frame(
-            synthetic_board_frame(moves=("e2e4", "d7d5", "e4d5"))
-        )
-        self.assertEqual(capture["last_move"], "e4d5")
-        self.assertEqual(
-            capture["last_move_detail"]["capture"]["piece_id"], "black_pawn_d"
-        )
-        self.assertEqual(capture["last_move_detail"]["capture"]["at"]["square"], "d5")
-        self.assertEqual(capture["expected_piece_count"], 31)
-        pawn = next(
-            value
-            for value in capture["observed_pieces"]
-            if value["piece_id"] == "white_pawn_e"
-        )
-        self.assertEqual(pawn["square"], "d5")
-
-    def test_castling_moves_two_exact_piece_ids(self) -> None:
-        moves = ("e2e4", "e7e5", "g1f3", "b8c6", "f1e2", "g8f6")
-        tracker = VisionBoardTracker(stable_frames=1)
-        tracker.process_frame(synthetic_board_frame())
-        for index in range(1, len(moves) + 1):
-            tracker.process_frame(synthetic_board_frame(moves=moves[:index]))
-        castled = tracker.process_frame(synthetic_board_frame(moves=(*moves, "e1g1")))
-        self.assertEqual(castled["last_move"], "e1g1")
-        observed = {
-            value["piece_id"]: value["square"] for value in castled["observed_pieces"]
+def transcription(rows, status="complete"):
+    confidence = {
+        "board_detection": "high",
+        "grid_mapping": "high",
+        "piece_recognition": "high" if status == "complete" else "medium",
+    }
+    return BoardTranscription.model_validate(
+        {
+            "status": status,
+            "confidence": confidence,
+            "rows": {f"row_{index + 1}": row for index, row in enumerate(rows)},
+            "problems": [],
         }
-        self.assertEqual(observed["white_king"], "g1")
-        self.assertEqual(observed["white_rook_h"], "f1")
-        self.assertEqual(
-            castled["last_move_detail"]["rook_transfer"]["piece_id"],
-            "white_rook_h",
+    )
+
+
+def board_rows(board):
+    return tuple(
+        "".join(
+            (
+                board.piece_at(chess.square(file_index, rank)).symbol()
+                if board.piece_at(chess.square(file_index, rank))
+                else "."
+            )
+            for file_index in range(8)
         )
-        self.assertEqual(
-            castled["last_move_detail"]["rook_transfer"]["to"]["coordinate"],
-            {"x": 5, "y": 0},
+        for rank in range(7, -1, -1)
+    )
+
+
+class FakeResponses:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def parse(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            status="completed",
+            output_parsed=self.result,
         )
 
-    def test_illegal_rearrangement_reports_each_piece_disagreement(self) -> None:
-        tracker = VisionBoardTracker(stable_frames=1)
-        tracker.process_frame(synthetic_board_frame())
-        frame = synthetic_board_frame(moves=("e2e4",))
-        tracker.process_frame(frame)
-        illegal = VisionBoardTracker(stable_frames=1)
-        result = illegal.process_frame(frame)
-        self.assertEqual(result["state"], "move")
-        comparison = {value["piece_id"]: value for value in result["piece_comparison"]}
-        self.assertEqual(comparison["white_pawn_e"]["observed_square"], "e4")
-        self.assertEqual(
-            comparison["white_pawn_e"]["observed_coordinate"], {"x": 4, "y": 3}
+
+class VisionTests(unittest.TestCase):
+    def test_complete_schema_rejects_unknowns_and_low_confidence(self) -> None:
+        rows = list(board_rows(chess.Board()))
+        rows[0] = "?" + rows[0][1:]
+        with self.assertRaises(PydanticValidationError):
+            transcription(tuple(rows))
+        with self.assertRaises(PydanticValidationError):
+            BoardTranscription.model_validate(
+                {
+                    "status": "complete",
+                    "confidence": {
+                        "board_detection": "high",
+                        "grid_mapping": "high",
+                        "piece_recognition": "low",
+                    },
+                    "rows": {
+                        f"row_{index + 1}": row
+                        for index, row in enumerate(board_rows(chess.Board()))
+                    },
+                    "problems": [],
+                }
+            )
+
+    def test_orientation_maps_image_rows_to_algebraic_squares(self) -> None:
+        rows = board_rows(chess.Board())
+        white = image_rows_to_board(rows, "white_bottom")
+        self.assertEqual(white[chess.A1], "R")
+        self.assertEqual(white[chess.H8], "r")
+        black = image_rows_to_board(rows, "black_bottom")
+        self.assertEqual(black[chess.H8], "R")
+
+    def test_all_64_image_cells_round_trip_for_both_orientations(self) -> None:
+        for orientation in ("white_bottom", "black_bottom"):
+            seen = set()
+            for row in range(8):
+                for column in range(8):
+                    square = image_cell_to_square(row, column, orientation)
+                    self.assertEqual(
+                        square_to_image_cell(square, orientation), (row, column)
+                    )
+                    seen.add(square)
+            self.assertEqual(seen, set(range(64)))
+
+    def test_all_four_rotations_are_bijective_over_64_cells(self) -> None:
+        for rotation in (0, 90, 180, 270):
+            mapped = {
+                rotate_image_cell(row, column, rotation)
+                for row in range(8)
+                for column in range(8)
+            }
+            self.assertEqual(
+                mapped, {(row, column) for row in range(8) for column in range(8)}
+            )
+        self.assertEqual(rotate_image_cell(0, 0, 90), (0, 7))
+        self.assertEqual(rotate_image_cell(0, 0, 180), (7, 7))
+        self.assertEqual(rotate_image_cell(0, 0, 270), (7, 0))
+
+    def test_canonical_rows_are_identical_for_either_camera_side(self) -> None:
+        white_rows = board_rows(chess.Board())
+        self.assertEqual(canonical_rows(white_rows, "white_bottom"), white_rows)
+        black_image_rows = tuple(row[::-1] for row in white_rows[::-1])
+        self.assertEqual(canonical_rows(black_image_rows, "black_bottom"), white_rows)
+
+    def test_image_cell_mapping_rejects_invalid_coordinates(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "inside"):
+            image_cell_to_square(8, 0, "white_bottom")
+        with self.assertRaisesRegex(ValidationError, "orientation"):
+            image_cell_to_square(0, 0, "sideways")
+
+    def test_one_legal_changed_position_infers_move(self) -> None:
+        board = chess.Board()
+        moved = board.copy()
+        moved.push_uci("e2e4")
+        observed = image_rows_to_board(board_rows(moved))
+        self.assertEqual(infer_legal_move(board, observed).uci(), "e2e4")
+        self.assertIsNone(infer_legal_move(board, board_symbols(board)))
+
+    def test_invalid_position_is_not_repaired_by_legality(self) -> None:
+        board = chess.Board()
+        observed = board_symbols(board)
+        observed[chess.E2] = "."
+        with self.assertRaisesRegex(ValidationError, "exactly one legal move"):
+            infer_legal_move(board, observed)
+
+    def test_piece_payload_lists_every_detected_piece(self) -> None:
+        payload = board_payload(board_rows(chess.Board()), "white_bottom")
+        self.assertEqual(len(payload), 32)
+        self.assertIn(
+            {
+                "square": "e1",
+                "symbol": "K",
+                "color": "white",
+                "type": "king",
+                "grid": {"x": 4, "y": 0},
+            },
+            payload,
         )
 
-    def test_fusion_agreement_accepts_and_disagreement_vetoes(self) -> None:
-        tracker = VisionBoardTracker(stable_frames=1)
-        tracker.configure_fusion(True, board_matrix(chess.Board()))
-        ready = tracker.process_frame(synthetic_board_frame())
-        self.assertEqual(ready["state"], "ready")
-        moved_board = chess.Board()
-        moved_board.push_uci("e2e4")
-        tracker.set_aux_matrix(board_matrix(moved_board))
-        moved = tracker.process_frame(synthetic_board_frame(moves=("e2e4",)))
-        self.assertEqual(moved["last_move"], "e2e4")
-        tracker.set_aux_matrix(board_matrix(chess.Board()))
-        conflict = tracker.process_frame(synthetic_board_frame(moves=("e2e4", "e7e5")))
-        self.assertEqual(conflict["state"], "conflict")
-        self.assertIn("disagrees", conflict["error"])
+    def test_piece_payload_uses_configured_machine_centers(self) -> None:
+        import json
+        from pathlib import Path
+        from chess_gantry.config import AppConfig
 
-    def test_lichess_submission_occurs_once_after_stability(self) -> None:
-        submitted = []
-        tracker = VisionBoardTracker(
-            stable_frames=2,
-            move_submitter=lambda game_id, uci: submitted.append((game_id, uci)),
+        config = AppConfig.from_mapping(
+            json.loads(
+                (Path(__file__).resolve().parents[1] / "config.json").read_text()
+            )
         )
-        tracker.configure_lichess("game1234", True)
-        standard = synthetic_board_frame()
-        tracker.process_frame(standard)
-        tracker.process_frame(standard)
-        moved = synthetic_board_frame(moves=("e2e4",))
-        tracker.process_frame(moved)
-        tracker.process_frame(moved)
-        tracker.process_frame(moved)
-        self.assertEqual(submitted, [("game1234", "e2e4")])
+        payload = {
+            value["square"]: value
+            for value in board_payload(
+                board_rows(chess.Board()), "white_bottom", config.board
+            )
+        }
+        self.assertEqual(payload["a1"]["machine_mm"], {"x": 40.0, "y": 298.0})
+        self.assertEqual(payload["h1"]["machine_mm"], {"x": 320.0, "y": 298.0})
+        self.assertEqual(payload["a8"]["machine_mm"], {"x": 40.0, "y": 18.0})
+        self.assertEqual(payload["h8"]["machine_mm"], {"x": 320.0, "y": 18.0})
 
-    def test_failed_lichess_write_does_not_repeat_without_operator_retry(self) -> None:
-        attempts = []
+    def test_sol_request_uses_model_image_and_structured_output(self) -> None:
+        result = transcription(board_rows(chess.Board()))
+        responses = FakeResponses(result)
+        client = SimpleNamespace(responses=responses)
+        transcriber = SolTranscriber(client=client)
+        self.assertEqual(transcriber.transcribe(b"jpeg"), result)
+        call = responses.calls[0]
+        self.assertEqual(call["model"], "gpt-5.6-sol")
+        self.assertIs(call["text_format"], BoardTranscription)
+        self.assertFalse(call["store"])
+        image_url = call["input"][1]["content"][1]["image_url"]
+        self.assertEqual(base64.b64decode(image_url.split(",", 1)[1]), b"jpeg")
 
-        def fail(game_id, uci):
-            attempts.append((game_id, uci))
-            raise ValidationError("uncertain network result")
-
-        tracker = VisionBoardTracker(stable_frames=2, move_submitter=fail)
-        tracker.configure_lichess("game1234", True)
-        moved = synthetic_board_frame(moves=("e2e4",))
-        for _ in range(8):
-            result = tracker.process_frame(moved)
-        self.assertEqual(result["state"], "error")
-        self.assertEqual(attempts, [("game1234", "e2e4")])
-        tracker.process_frame(synthetic_board_frame()[:100, :100])
-        for _ in range(4):
-            result = tracker.process_frame(moved)
-        self.assertEqual(result["state"], "error")
-        self.assertEqual(attempts, [("game1234", "e2e4")])
-        tracker.retry()
-        tracker.process_frame(moved)
-        result = tracker.process_frame(moved)
-        self.assertEqual(result["state"], "error")
-        self.assertEqual(attempts, [("game1234", "e2e4"), ("game1234", "e2e4")])
-
-    def test_promoted_pawn_keeps_identity_and_changes_tracked_type(self) -> None:
-        moves = (
-            "a2a4",
-            "b7b5",
-            "a4b5",
-            "h7h6",
-            "b5b6",
-            "h6h5",
-            "b6b7",
-            "h5h4",
-            "b7a8q",
-        )
-        tracker = VisionBoardTracker(stable_frames=1)
-        tracker.process_frame(synthetic_board_frame())
-        for index in range(1, len(moves) + 1):
-            result = tracker.process_frame(synthetic_board_frame(moves=moves[:index]))
-        promoted = next(
-            value
-            for value in result["piece_comparison"]
-            if value["piece_id"] == "white_pawn_a"
-        )
-        self.assertEqual(result["last_move"], "b7a8q")
-        self.assertEqual(result["last_move_detail"]["promotion"], "queen")
-        self.assertEqual(promoted["starting_type"], "pawn")
-        self.assertEqual(promoted["type"], "queen")
-        self.assertEqual(promoted["observed_square"], "a8")
-
-    def test_missing_reference_never_commits(self) -> None:
-        frame = synthetic_board_frame()
-        frame[:220, :220] = 255
-        result = VisionBoardTracker(stable_frames=1).process_frame(frame)
-        self.assertEqual(result["state"], "waiting")
-        self.assertIn("reference marker", result["error"])
-
-    def test_manager_runs_demo_source_and_stops_cleanly(self) -> None:
-        manager = VisionManager(source="demo:e2e4", enabled=True, frame_hz=20)
+    def test_two_matching_observations_emit_one_move(self) -> None:
+        moves = []
+        manager = SolVisionManager(transcriber=object(), move_handler=moves.append)
         try:
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                status = manager.status()
-                if status["last_move"] == "e2e4":
-                    break
-                time.sleep(0.02)
-            self.assertEqual(status["last_move"], "e2e4")
-            self.assertTrue(manager.preview_jpeg().startswith(b"\xff\xd8"))
+            manager.start_game()
+            board = chess.Board()
+            board.push_uci("e2e4")
+            result = transcription(board_rows(board))
+            manager._accept(result)
+            self.assertEqual(moves, [])
+            manager._accept(result)
+            self.assertEqual(moves, ["e2e4"])
+            manager._accept(result)
+            self.assertEqual(moves, ["e2e4"])
+            self.assertEqual(manager.status()["last_move"], "e2e4")
         finally:
             manager.close()
 
-    def test_invalid_camera_configuration_is_rejected(self) -> None:
-        manager = VisionManager()
+    def test_partial_result_never_emits_move(self) -> None:
+        moves = []
+        manager = SolVisionManager(transcriber=object(), move_handler=moves.append)
         try:
-            with self.assertRaisesRegex(ValidationError, "source"):
-                manager.configure("", True)
+            manager.start_game()
+            rows = list(board_rows(chess.Board()))
+            rows[4] = rows[4][:4] + "?" + rows[4][5:]
+            partial = transcription(tuple(rows), "partial")
+            manager._accept(partial)
+            manager._accept(partial)
+            self.assertEqual(moves, [])
         finally:
             manager.close()
+
+    def test_camera_rotation_validation_and_status(self) -> None:
+        manager = SolVisionManager(transcriber=object())
+        try:
+            manager.configure(
+                source="snapshot:http://phone/shot.jpg",
+                enabled=False,
+                rotation=90,
+            )
+            self.assertEqual(manager.status()["rotation"], 90)
+            with self.assertRaisesRegex(ValidationError, "rotation"):
+                manager.configure(
+                    source="snapshot:http://phone/shot.jpg",
+                    enabled=False,
+                    rotation=45,
+                )
+        finally:
+            manager.close()
+
+    def test_board_calibration_validates_corners_and_warps_square(self) -> None:
+        import numpy
+
+        corners = validate_calibration(
+            [
+                {"x": 0.1, "y": 0.1},
+                {"x": 0.9, "y": 0.1},
+                {"x": 0.9, "y": 0.9},
+                {"x": 0.1, "y": 0.9},
+            ]
+        )
+        frame = numpy.zeros((1080, 1920, 3), dtype=numpy.uint8)
+        warped = warp_board_frame(frame, corners)
+        self.assertEqual(warped.shape, (1024, 1024, 3))
+
+    def test_board_calibration_rejects_small_or_nonconvex_shape(self) -> None:
+        with self.assertRaises(ValidationError):
+            validate_calibration(
+                [
+                    {"x": 0.1, "y": 0.1},
+                    {"x": 0.2, "y": 0.1},
+                    {"x": 0.15, "y": 0.15},
+                    {"x": 0.1, "y": 0.2},
+                ]
+            )
+
+    def test_manager_calibration_round_trip(self) -> None:
+        manager = SolVisionManager(transcriber=object())
+        try:
+            status = manager.calibrate(
+                [
+                    {"x": 0.1, "y": 0.1},
+                    {"x": 0.9, "y": 0.1},
+                    {"x": 0.9, "y": 0.9},
+                    {"x": 0.1, "y": 0.9},
+                ]
+            )
+            self.assertTrue(status["calibrated"])
+            self.assertFalse(manager.clear_calibration()["calibrated"])
+        finally:
+            manager.close()
+
+    def test_calibration_persists_and_invalidates_on_rotation(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "calibration.json"
+            corners = [
+                {"x": 0.1, "y": 0.1},
+                {"x": 0.9, "y": 0.1},
+                {"x": 0.9, "y": 0.9},
+                {"x": 0.1, "y": 0.9},
+            ]
+            manager = SolVisionManager(transcriber=object(), calibration_path=path)
+            try:
+                manager.calibrate(corners)
+                self.assertTrue(path.exists())
+            finally:
+                manager.close()
+            restored = SolVisionManager(transcriber=object(), calibration_path=path)
+            try:
+                self.assertTrue(restored.status()["calibrated"])
+                restored.configure(
+                    source=restored.status()["source"],
+                    enabled=False,
+                    rotation=90,
+                )
+                self.assertFalse(restored.status()["calibrated"])
+                self.assertFalse(path.exists())
+            finally:
+                restored.close()
 
 
 if __name__ == "__main__":

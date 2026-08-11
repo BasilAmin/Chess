@@ -4,6 +4,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
+if [[ -f .env.local ]]; then
+  mode="$(stat -c '%a' .env.local)"
+  if [[ "$mode" != "600" ]]; then
+    printf '.env.local must use mode 600, not %s. Run: chmod 600 .env.local\n' "$mode" >&2
+    exit 2
+  fi
+  set -a
+  source .env.local
+  set +a
+fi
+
 CLERK_PUBLISHABLE_KEY="${CLERK_PUBLISHABLE_KEY:-}"
 
 IMAGE="${CHESS_GANTRY_IMAGE:-chess:latest}"
@@ -13,17 +24,10 @@ HTTP_PORT="${CHESS_GANTRY_HTTP_PORT:-80}"
 ALT_PORT="${CHESS_GANTRY_ALT_PORT:-8000}"
 APP_PORT=8000
 SERIAL_DEVICE="${CHESS_GANTRY_SERIAL_PORT:-/dev/ttyUSB0}"
-I2C_DEVICE="${CHESS_GANTRY_I2C_DEVICE:-/dev/i2c-1}"
 CAMERA_SOURCE="${CHESS_GANTRY_CAMERA_SOURCE:-}"
 VIDEO_DEVICE="${CHESS_GANTRY_VIDEO_DEVICE:-}"
 APP_UID="${CHESS_GANTRY_APP_UID:-65532}"
 APP_GID="${CHESS_GANTRY_APP_GID:-65532}"
-
-if [[ -z $CLERK_PUBLISHABLE_KEY ]]; then
-  printf 'Export CLERK_PUBLISHABLE_KEY before running %s.\n' "$0" >&2
-  printf 'Copy it from the Clerk dashboard; it looks like pk_test_abc123...\n' >&2
-  exit 2
-fi
 
 if [[ "$(uname -s)" == Linux ]] && command -v sudo > /dev/null 2>&1; then
   printf '==> Preparing the Docker service; sudo will ask for your password\n'
@@ -182,14 +186,18 @@ RUN_ARGS=(
   --publish "${BIND_ADDRESS}:${HTTP_PORT}:${APP_PORT}"
   --volume "$ROOT/config.json:/app/config.json:ro"
   --volume "$ROOT/data:/app/data"
-  --env "CLERK_PUBLISHABLE_KEY=$CLERK_PUBLISHABLE_KEY"
   --env "CHESS_GANTRY_PUBLIC_HOST=$MDNS_NAME"
   --env "CHESS_GANTRY_WEB_HOST=0.0.0.0"
   --env "CHESS_GANTRY_WEB_PORT=$APP_PORT"
-  --env "CHESS_GANTRY_I2C_BUS=1"
-  --env "CHESS_GANTRY_MCP23017_ADDRESS=0x20"
   --env "CHESS_GANTRY_DISTROLESS=1"
 )
+
+if [[ -n $CLERK_PUBLISHABLE_KEY ]]; then
+  RUN_ARGS+=(--env "CLERK_PUBLISHABLE_KEY=$CLERK_PUBLISHABLE_KEY")
+  printf '==> Clerk authentication enabled\n'
+else
+  printf '==> WARNING: Clerk is unset; anyone who can reach the dashboard can control the gantry\n'
+fi
 
 if [[ -n $CAMERA_SOURCE && -n $VIDEO_DEVICE ]]; then
   printf 'Set only CHESS_GANTRY_CAMERA_SOURCE or CHESS_GANTRY_VIDEO_DEVICE, not both.\n' >&2
@@ -210,28 +218,27 @@ elif [[ -n $CAMERA_SOURCE ]]; then
   RUN_ARGS+=(--env "CHESS_GANTRY_CAMERA_SOURCE=$CAMERA_SOURCE" --env "CHESS_GANTRY_CAMERA_ENABLED=1")
   printf '==> Network or configured camera source attached\n'
 else
-  printf '==> No camera source configured; overhead vision starts disabled\n'
+  CAMERA_SOURCE="snapshot:http://192.168.100.88:8080/shot.jpg"
+  RUN_ARGS+=(--env "CHESS_GANTRY_CAMERA_SOURCE=$CAMERA_SOURCE" --env "CHESS_GANTRY_CAMERA_ENABLED=1")
+  printf '==> Using default phone camera %s\n' "$CAMERA_SOURCE"
+fi
+
+if [[ -n ${OPENAI_API_KEY:-} ]]; then
+  RUN_ARGS+=(--env "OPENAI_API_KEY=$OPENAI_API_KEY")
+  printf '==> OpenAI Sol API key attached\n'
+else
+  printf '==> WARNING: OPENAI_API_KEY is unset; camera preview works but Sol recognition cannot start\n'
 fi
 
 if [[ -n ${LICHESS_TOKEN:-} ]]; then
   RUN_ARGS+=(--env "LICHESS_TOKEN=$LICHESS_TOKEN")
   printf '==> Lichess Board API write token attached\n'
 else
-  printf '==> LICHESS_TOKEN is unset; sensor move writes to Lichess are disabled\n'
+  printf '==> LICHESS_TOKEN is unset; Lichess game modes are disabled\n'
 fi
 
 if [[ $ALT_PORT != "$HTTP_PORT" ]]; then
   RUN_ARGS+=(--publish "${BIND_ADDRESS}:${ALT_PORT}:${APP_PORT}")
-fi
-
-if [[ -e $I2C_DEVICE ]]; then
-  RUN_ARGS+=(--device "$I2C_DEVICE")
-  if i2c_gid="$(stat -c '%g' "$I2C_DEVICE" 2> /dev/null)"; then
-    RUN_ARGS+=(--group-add "$i2c_gid")
-  fi
-  printf '==> I2C device %s attached for MCP23017 GPB0\n' "$I2C_DEVICE"
-else
-  printf '==> %s is absent; reed switch panel will report an I2C error\n' "$I2C_DEVICE"
 fi
 
 if [[ -e $SERIAL_DEVICE ]]; then
@@ -259,7 +266,7 @@ if [[ $ALT_PORT != "$HTTP_PORT" ]]; then
   printf '==>                   also: %s\n' "$(url_for "$LAN_IP" "$ALT_PORT")"
 fi
 printf '==>              by name: %s\n' "$(url_for "$MDNS_NAME" "$HTTP_PORT")"
-printf '==> Open to every host that can route here. Clerk sign-in is required.\n'
+printf '==> Open to every host that can route here. Configure Clerk for authenticated access.\n'
 printf '==> Control-C stops the server.\n'
 
 "${DOCKER[@]}" run --rm "${RUN_ARGS[@]}" "$IMAGE"

@@ -29,6 +29,8 @@ REQUIRED = (
     "requests",
     "numpy",
     "cv2",
+    "openai",
+    "pydantic",
     "chess_gantry.cli",
     "chess_gantry.clerk_auth",
     "chess_gantry.web_app",
@@ -39,9 +41,11 @@ REQUIRED = (
     "chess_gantry.lichess_pgn",
     "chess_gantry.upstash_persistence",
     "chess_gantry.vision",
+    "chess_gantry.game_coordinator",
+    "chess_gantry.lichess_oauth",
     "chess_gantry.debug_console.server",
 )
-GPIO_MODULES = ("RPi.GPIO", "gpiozero", "smbus2", "spidev")
+GPIO_MODULES = ("RPi.GPIO", "gpiozero", "spidev")
 TRUST_STORE = "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
 
 
@@ -80,8 +84,6 @@ def main(argv: list) -> int:
     try:
         import cv2
 
-        if not hasattr(cv2, "aruco") or not hasattr(cv2.aruco, "ArucoDetector"):
-            failures.append("OpenCV does not provide ArUco detection")
         build = cv2.getBuildInformation()
         if "FFMPEG:                      YES" not in build:
             failures.append("OpenCV was built without FFmpeg camera support")

@@ -12,6 +12,7 @@ from time import sleep
 
 from .config import AppConfig
 from .errors import GantryError, PendingTransactionError, ValidationError
+from .environment import load_local_environment
 from .models import BoardState, MoveDelta
 from .persistence import read_json
 from .serial_link import (
@@ -22,13 +23,6 @@ from .serial_link import (
     parse_endstop_states,
 )
 from .service import GantryService
-from .reed_switch import (
-    MCP23017BankDiagnostic,
-    MCP23017ReedSwitch,
-    ReedState,
-    bank_transitions,
-    reed_transition,
-)
 from .debug_console.runtime import TOKEN_ENVIRONMENT_KEY
 from .lichess_pgn import fetch_pgn, pgn_moves
 from .lichess_follow import follow_game
@@ -221,108 +215,35 @@ def _parser() -> ArgumentParser:
         "--demo", action="store_true", help="use simulated open endstops"
     )
 
-    reed_test = commands.add_parser(
-        "reed-test",
-        help="read MCP23017 GPB0 and print reed switch state transitions",
-    )
-    reed_test.add_argument(
-        "--bus", type=int, default=1, help="Linux I2C bus number (default: 1)"
-    )
-    reed_test.add_argument(
-        "--address",
-        type=lambda value: int(value, 0),
-        default=0x20,
-        help="MCP23017 I2C address, decimal or 0x-prefixed (default: 0x20)",
-    )
-    reed_test.add_argument(
-        "--interval",
-        type=float,
-        default=0.1,
-        help="seconds between reads (default: 0.1)",
-    )
-    reed_test.add_argument(
-        "--samples",
-        type=int,
-        default=0,
-        help="stop after this many reads; zero watches until Ctrl+C",
-    )
-    reed_test.add_argument(
-        "--active-high",
-        action="store_true",
-        help="treat a high GPB0 input as closed instead of the default active-low wiring",
-    )
-    reed_test.add_argument(
-        "--demo", action="store_true", help="alternate simulated open/closed states"
-    )
-
-    reed_bank_test = commands.add_parser(
-        "reed-bank-test",
-        help="scan MCP23017 addresses 0x20-0x27 and watch all GPA/GPB inputs",
-    )
-    reed_bank_test.add_argument("--bus", type=int, default=1)
-    reed_bank_test.add_argument(
-        "--first-address", type=lambda value: int(value, 0), default=0x20
-    )
-    reed_bank_test.add_argument(
-        "--last-address", type=lambda value: int(value, 0), default=0x27
-    )
-    reed_bank_test.add_argument("--interval", type=float, default=0.1)
-    reed_bank_test.add_argument("--samples", type=int, default=100)
-    reed_bank_test.add_argument("--active-high", action="store_true")
-    reed_bank_test.add_argument(
-        "--configure-inputs",
-        action="store_true",
-        help="write all GPA/GPB pins as pulled-up inputs; use only for confirmed MCP23017 addresses",
-    )
-
-    vision_markers = commands.add_parser(
-        "vision-markers",
-        help="generate unique ArUco piece tags and four board reference tags",
-    )
-    vision_markers.add_argument(
-        "--output-dir",
-        default="data/vision-markers",
-        help="directory for marker PNGs and manifest (default: data/vision-markers)",
-    )
-    vision_markers.add_argument(
-        "--marker-pixels",
-        type=int,
-        default=240,
-        help="marker image width and height in pixels (default: 240)",
-    )
-
     vision_test = commands.add_parser(
         "vision-test",
-        help="test one overhead camera or image with exact-piece ArUco detection",
+        help="capture one or more frames and transcribe the board with OpenAI Sol",
     )
     vision_test.add_argument(
         "--source",
-        default="demo",
-        help="demo, demo:e2e4, image path, camera index/device, stream URL, or snapshot:URL",
+        default="snapshot:http://192.168.100.88:8080/shot.jpg",
+        help="image path, camera index/device, stream URL, or snapshot:URL",
     )
     vision_test.add_argument(
         "--frames",
         type=int,
-        default=3,
-        help="frames to process before exiting; zero watches until Ctrl+C (default: 3)",
+        default=1,
+        help="frames to transcribe; zero watches until Ctrl+C (default: 1)",
     )
     vision_test.add_argument(
         "--interval",
         type=float,
-        default=0.2,
-        help="seconds between processed frames (default: 0.2)",
+        default=3.0,
+        help="seconds between Sol requests (default: 3)",
     )
     vision_test.add_argument(
-        "--stable-frames",
-        type=int,
-        default=3,
-        help="matching frames required before accepting a board (default: 3)",
+        "--preview-output",
+        help="write the latest camera frame to this JPEG path",
     )
     vision_test.add_argument(
-        "--min-marker-px",
-        type=float,
-        default=24.0,
-        help="minimum detected marker side in pixels (default: 24)",
+        "--orientation",
+        choices=("white_bottom", "black_bottom"),
+        default="white_bottom",
     )
 
     reference_gantry = commands.add_parser(
@@ -356,8 +277,8 @@ def _parser() -> ArgumentParser:
     web = commands.add_parser("web", help="launch the browser controller")
     web.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="bind address (default: every interface)",
+        default="127.0.0.1",
+        help="bind address (default: local only)",
     )
     web.add_argument(
         "--web-port", type=int, default=8000, help="browser port (default: 8000)"
@@ -367,6 +288,16 @@ def _parser() -> ArgumentParser:
     )
     web.add_argument(
         "--demo", action="store_true", help="run with a simulated Marlin controller"
+    )
+    web.add_argument(
+        "--allow-network",
+        action="store_true",
+        help="allow an unauthenticated non-loopback bind; every reachable user can control the gantry",
+    )
+    web.add_argument(
+        "--require-clerk",
+        action="store_true",
+        help="require Clerk sign-in using $CLERK_PUBLISHABLE_KEY",
     )
 
     console = commands.add_parser(
@@ -781,9 +712,6 @@ _COMMANDS = frozenset(
         "ports",
         "diagnose",
         "endstop-watch",
-        "reed-test",
-        "reed-bank-test",
-        "vision-markers",
         "vision-test",
         "reference-gantry",
         "home-gantry",
@@ -837,6 +765,7 @@ def _normalize_argv(argv: Optional[Sequence[str]]) -> Optional[Sequence[str]]:
 
 
 def run(argv: Optional[Sequence[str]] = None) -> int:
+    load_local_environment()
     parser = _parser()
     args = parser.parse_args(_normalize_argv(argv))
 
@@ -915,109 +844,26 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                         sleep(args.interval)
             return 0
 
-        if args.command == "reed-test":
-            if args.interval <= 0:
-                parser.error("--interval must be positive")
-            if args.samples < 0:
-                parser.error("--samples cannot be negative")
-            reader = MCP23017ReedSwitch(
-                bus_number=args.bus,
-                address=args.address,
-                active_low=not args.active_high,
-            )
-            previous: Optional[ReedState] = None
-            sample = 0
-            print(
-                f"Watching MCP23017 GPB0 on /dev/i2c-{args.bus} at "
-                f"0x{args.address:02X}; press Ctrl+C to stop.",
-                flush=True,
-            )
-            while args.samples == 0 or sample < args.samples:
-                if args.demo:
-                    current = ReedState(
-                        closed=bool(sample % 2),
-                        raw_high=not bool(sample % 2),
-                        bus=args.bus,
-                        address=args.address,
-                    )
-                else:
-                    current = reader.read()
-                transition = reed_transition(previous, current)
-                if transition:
-                    print(transition, flush=True)
-                previous = current
-                sample += 1
-                if args.samples == 0 or sample < args.samples:
-                    sleep(args.interval)
-            return 0
-
-        if args.command == "reed-bank-test":
-            if args.first_address > args.last_address:
-                parser.error("--first-address cannot exceed --last-address")
-            if args.samples < 0:
-                parser.error("--samples cannot be negative")
-            if args.interval <= 0:
-                parser.error("--interval must be positive")
-            addresses = tuple(range(args.first_address, args.last_address + 1))
-            reader = MCP23017BankDiagnostic(
-                bus_number=args.bus,
-                addresses=addresses,
-                active_low=not args.active_high,
-                configure=args.configure_inputs,
-            )
-            print(
-                f"Scanning /dev/i2c-{args.bus} addresses "
-                f"0x{args.first_address:02X}-0x{args.last_address:02X}; "
-                + (
-                    "all GPA/GPB pins will be configured as pulled-up inputs."
-                    if args.configure_inputs
-                    else "read-only discovery mode; no configuration registers are written."
-                )
-            )
-            previous = None
-            count = 0
-            while args.samples == 0 or count < args.samples:
-                current = reader.read()
-                if previous is None:
-                    _print_json(current)
-                else:
-                    for message in bank_transitions(previous, current):
-                        print(message, flush=True)
-                previous = current
-                count += 1
-                if args.samples == 0 or count < args.samples:
-                    sleep(args.interval)
-            return 0
-
-        if args.command == "vision-markers":
-            from .vision import generate_marker_pack
-
-            manifest = generate_marker_pack(
-                Path(args.output_dir), marker_pixels=args.marker_pixels
-            )
-            print(
-                f"Generated {len(manifest['pieces'])} piece markers and 4 board references "
-                f"in {args.output_dir}."
-            )
-            print(f"Manifest: {Path(args.output_dir) / 'manifest.json'}")
-            return 0
-
         if args.command == "vision-test":
-            from .vision import VisionBoardTracker, open_frame_source
+            from .vision import SolTranscriber, encode_jpeg, open_frame_source
 
             if args.frames < 0:
                 parser.error("--frames cannot be negative")
             if args.interval <= 0:
                 parser.error("--interval must be positive")
-            tracker = VisionBoardTracker(
-                stable_frames=args.stable_frames,
-                min_marker_side_px=args.min_marker_px,
-            )
+            transcriber = SolTranscriber()
             reader = open_frame_source(args.source)
             frame_index = 0
             try:
                 while args.frames == 0 or frame_index < args.frames:
-                    status = tracker.process_frame(reader.read())
+                    frame = reader.read()
+                    jpeg = encode_jpeg(frame)
+                    result = transcriber.transcribe(jpeg)
+                    status = result.model_dump()
+                    if args.preview_output:
+                        target = Path(args.preview_output)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(jpeg)
                     frame_index += 1
                     _print_json(status)
                     if args.frames == 0 or frame_index < args.frames:
@@ -1058,6 +904,8 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                 port=args.web_port,
                 open_browser=not args.no_browser,
                 demo=args.demo,
+                allow_network=args.allow_network,
+                require_clerk=args.require_clerk,
             )
             return 0
 

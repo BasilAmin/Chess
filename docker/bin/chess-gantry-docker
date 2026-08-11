@@ -13,7 +13,6 @@ DEVICE_REPORT = (
     ("Marlin serial", os.environ.get("CHESS_GANTRY_SERIAL_PORT", "/dev/ttyUSB0")),
     ("GPIO (sysfs/mem)", "/dev/gpiomem"),
     ("GPIO (character dev)", "/dev/gpiochip0"),
-    ("I2C bus 1", "/dev/i2c-1"),
     ("SPI 0.0", "/dev/spidev0.0"),
     ("SPI 0.1", "/dev/spidev0.1"),
     ("USB bus", "/dev/bus/usb"),
@@ -36,6 +35,9 @@ def _log(message: str) -> None:
 
 def _report_devices() -> None:
     for label, path in DEVICE_REPORT:
+        if "://" in path or path.startswith("snapshot:"):
+            _log("configured " + label + " source " + path)
+            continue
         node = Path(path)
         if not node.exists():
             _log("missing " + label + " at " + path)
@@ -102,11 +104,14 @@ def _web_command(base: list) -> list:
     command = base + ["web", "--host", host, "--web-port", port, "--no-browser"]
     if _truthy("CHESS_GANTRY_DEMO"):
         command.append("--demo")
-    if not os.environ.get("CLERK_PUBLISHABLE_KEY", "").strip():
-        _log("CLERK_PUBLISHABLE_KEY is not set; the dashboard will refuse to start")
+    if os.environ.get("CLERK_PUBLISHABLE_KEY", "").strip():
+        command.append("--require-clerk")
+    elif host not in LOOPBACK_HOSTS:
+        command.append("--allow-network")
+        _log("WARNING: Clerk is unset; every reachable user can control the gantry")
     _log("web dashboard listening on http://" + host + ":" + port)
     if host not in LOOPBACK_HOSTS:
-        _log("the dashboard is exposed on every interface and needs a Clerk sign-in")
+        _log("the dashboard is exposed on a network-visible address")
     return command
 
 

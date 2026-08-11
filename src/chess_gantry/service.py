@@ -224,6 +224,34 @@ class GantryService:
             next_state=next_state,
         )
 
+    def commit_observed_moves(self, moves: tuple[MoveDelta, ...]) -> BoardState:
+        if not moves:
+            raise ValidationError("at least one observed move is required")
+        if self.journal.exists():
+            raise PendingTransactionError(
+                f"pending transaction exists at {self.journal.path}; reconcile it first"
+            )
+        with self.store.locked():
+            state = self.store.load()
+            for move in moves:
+                captured = state.validate_move(move)
+                capture_slot = None
+                if captured is not None:
+                    used = set(state.used_capture_slots())
+                    capture_slot = next(
+                        value for value in range(64) if value not in used
+                    )
+                state = state.applied(move, capture_slot)
+            self.store.save(state)
+            self.audit.append(
+                {
+                    "event": "camera_observed",
+                    "revision": state.revision,
+                    "moves": [move.to_dict() for move in moves],
+                }
+            )
+            return state
+
     def _require_execution_unlocked(self) -> None:
         if not self.config.safety.calibrated:
             raise ConfigurationError(

@@ -1,22 +1,160 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
+import base64
 import json
+import os
 import threading
 import time
-from typing import Any, Callable, Mapping, Optional
+from pathlib import Path
+from typing import Any, Callable, Literal, Optional
 from urllib.request import Request, urlopen
 
-from .board_sensor import Matrix, board_matrix, validate_matrix
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from typing_extensions import Annotated, Self
+
 from .errors import ConfigurationError, ValidationError
-from .lichess_pgn import lichess_client
+from .persistence import atomic_write_json, read_json
 
 
-REFERENCE_IDS = (0, 1, 2, 3)
-REFERENCE_POINTS = ((-0.7, -0.7), (8.7, -0.7), (8.7, 8.7), (-0.7, 8.7))
-PIECE_MARKER_START = 10
+MODEL = "gpt-5.6-sol"
+DEFAULT_PHONE_SOURCE = "browser:http://192.168.100.88:8080"
+PIECE_SYMBOLS = "PNBRQKpnbrqk"
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+RankString = Annotated[
+    str,
+    StringConstraints(
+        strict=True, min_length=8, max_length=8, pattern=r"^[PNBRQKpnbrqk.x?]{8}$"
+    ),
+]
+
+
+class ImageRows(StrictModel):
+    row_1: RankString
+    row_2: RankString
+    row_3: RankString
+    row_4: RankString
+    row_5: RankString
+    row_6: RankString
+    row_7: RankString
+    row_8: RankString
+
+    def values(self) -> tuple[str, ...]:
+        return (
+            self.row_1,
+            self.row_2,
+            self.row_3,
+            self.row_4,
+            self.row_5,
+            self.row_6,
+            self.row_7,
+            self.row_8,
+        )
+
+
+class BoardConfidence(StrictModel):
+    board_detection: Literal["high", "medium", "low", "none"]
+    grid_mapping: Literal["high", "medium", "low", "none"]
+    piece_recognition: Literal["high", "medium", "low", "none"]
+
+
+class BoardTranscription(StrictModel):
+    status: Literal["complete", "partial", "not_found", "unusable"]
+    confidence: BoardConfidence
+    rows: ImageRows
+    problems: list[
+        Literal[
+            "blur",
+            "glare",
+            "shadow",
+            "occlusion",
+            "cropping",
+            "perspective",
+            "low_resolution",
+            "ambiguous_pieces",
+            "ambiguous_colors",
+        ]
+    ] = Field(max_length=9)
+
+    @model_validator(mode="after")
+    def validate_result(self) -> Self:
+        encoded = "".join(self.rows.values())
+        unresolved = any(value in encoded for value in "x?")
+        if self.status == "complete":
+            if unresolved:
+                raise ValueError("complete transcription cannot contain x or ?")
+            if "low" in {
+                self.confidence.board_detection,
+                self.confidence.grid_mapping,
+                self.confidence.piece_recognition,
+            } or "none" in {
+                self.confidence.board_detection,
+                self.confidence.grid_mapping,
+                self.confidence.piece_recognition,
+            }:
+                raise ValueError(
+                    "complete transcription requires medium or high confidence"
+                )
+        elif self.status == "partial" and not unresolved:
+            raise ValueError("partial transcription must contain x or ?")
+        elif self.status in {"not_found", "unusable"} and encoded != "?" * 64:
+            raise ValueError("not_found and unusable must mark all cells unknown")
+        return self
+
+
+SYSTEM_PROMPT = """You are a deterministic visual transcriber for one overhead physical chessboard image.
+Return exactly one result matching the supplied schema.
+
+Select the complete physical 8x8 chessboard occupying the largest image area. The rows are IMAGE SPACE: row_1 is the board's top edge, row_8 its bottom edge, and characters run image-left to image-right. Do not infer algebraic orientation; the host maps orientation.
+
+Symbols: P N B R Q K are visually supported white pieces, p n b r q k black pieces, . confidently empty, x definitely occupied but type/color uncertain, ? occupancy uncertain.
+
+Inspect all 64 cells independently. Use only visible evidence. Never repair the image using a starting-position assumption, material counts, chess legality, previous frames, king counts, or expected moves. Transcribe visually illegal positions exactly as visible.
+
+complete means every cell is exact or confidently empty with reliable board, grid, and piece recognition. partial means the board/grid are reliable but at least one cell is x or ?. not_found means no qualifying board. unusable means a possible board cannot be transcribed reliably. For not_found or unusable return ???????? in all rows.
+"""
+
+
+def validate_calibration(corners: Any) -> tuple[tuple[float, float], ...]:
+    cv2, numpy = _vision_modules()
+    if not isinstance(corners, list) or len(corners) != 4:
+        raise ValidationError(
+            "board calibration needs top-left, top-right, bottom-right, and bottom-left"
+        )
+    parsed = []
+    for value in corners:
+        if not isinstance(value, dict):
+            raise ValidationError("each calibration corner must be an object")
+        x, y = value.get("x"), value.get("y")
+        if (
+            isinstance(x, bool)
+            or isinstance(y, bool)
+            or not isinstance(x, (int, float))
+            or not isinstance(y, (int, float))
+        ):
+            raise ValidationError("calibration coordinates must be numbers")
+        if not 0 <= float(x) <= 1 or not 0 <= float(y) <= 1:
+            raise ValidationError("calibration coordinates must be normalized 0..1")
+        parsed.append((float(x), float(y)))
+    points = numpy.float32(parsed)
+    if not cv2.isContourConvex((points * 1000).astype(numpy.int32)):
+        raise ValidationError("calibration corners must form a convex quadrilateral")
+    if abs(float(cv2.contourArea(points))) < 0.1:
+        raise ValidationError("calibrated board occupies too little of the frame")
+    return tuple(parsed)
+
+
+def warp_board_frame(frame: Any, corners: tuple[tuple[float, float], ...]) -> Any:
+    cv2, numpy = _vision_modules()
+    height, width = frame.shape[:2]
+    source = numpy.float32([(x * width, y * height) for x, y in corners])
+    destination = numpy.float32(((0, 0), (1023, 0), (1023, 1023), (0, 1023)))
+    transform = cv2.getPerspectiveTransform(source, destination)
+    return cv2.warpPerspective(frame, transform, (1024, 1024))
 
 
 def _vision_modules() -> tuple[Any, Any]:
@@ -25,816 +163,207 @@ def _vision_modules() -> tuple[Any, Any]:
         import numpy
     except ImportError as exc:
         raise ConfigurationError(
-            "vision requires opencv-python-headless and numpy; run uv sync"
+            "camera support requires opencv-python-headless and numpy"
         ) from exc
-    if not hasattr(cv2, "aruco") or not hasattr(cv2.aruco, "ArucoDetector"):
-        raise ConfigurationError("installed OpenCV does not provide ArUco detection")
     return cv2, numpy
 
 
-def aruco_dictionary() -> Any:
+def encode_jpeg(frame: Any, *, max_width: int = 1280, quality: int = 88) -> bytes:
     cv2, _ = _vision_modules()
-    dictionary_id = getattr(cv2.aruco, "DICT_ARUCO_MIP_36h12", None)
-    if dictionary_id is None:
-        dictionary_id = cv2.aruco.DICT_APRILTAG_36h11
-    return cv2.aruco.getPredefinedDictionary(dictionary_id)
+    height, width = frame.shape[:2]
+    if width > max_width:
+        frame = cv2.resize(frame, (max_width, round(height * max_width / width)))
+    ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise ValidationError("could not encode camera frame as JPEG")
+    return encoded.tobytes()
 
 
-def standard_piece_markers() -> dict[int, dict[str, str]]:
+def image_cell_to_square(row: int, column: int, orientation: str) -> int:
     import chess
 
-    board = chess.Board()
-    markers: dict[int, dict[str, str]] = {}
-    for offset, square in enumerate(sorted(board.piece_map())):
-        piece = board.piece_at(square)
-        assert piece is not None
-        file_name = chess.FILE_NAMES[chess.square_file(square)]
-        color = "white" if piece.color else "black"
-        if piece.piece_type == chess.PAWN:
-            identity = f"{color}_pawn_{file_name}"
-        elif piece.piece_type == chess.KING:
-            identity = f"{color}_king"
-        elif piece.piece_type == chess.QUEEN:
-            identity = f"{color}_queen"
-        else:
-            identity = f"{color}_{chess.piece_name(piece.piece_type)}_{file_name}"
-        markers[PIECE_MARKER_START + offset] = {
-            "piece_id": identity,
-            "color": color,
-            "type": chess.piece_name(piece.piece_type),
-            "start_square": chess.square_name(square),
-        }
-    return markers
+    if not 0 <= row < 8 or not 0 <= column < 8:
+        raise ValidationError("image board cell must be inside the 8x8 grid")
+    if orientation not in {"white_bottom", "black_bottom"}:
+        raise ValidationError("camera orientation must be white_bottom or black_bottom")
+    if orientation == "white_bottom":
+        file_index = column
+        rank_index = 7 - row
+    else:
+        file_index = 7 - column
+        rank_index = row
+    return chess.square(file_index, rank_index)
 
 
-def marker_manifest() -> dict[str, Any]:
+def square_to_image_cell(square: int, orientation: str) -> tuple[int, int]:
+    import chess
+
+    if not 0 <= square < 64:
+        raise ValidationError("chess square must be between 0 and 63")
+    file_index = chess.square_file(square)
+    rank_index = chess.square_rank(square)
+    if orientation == "white_bottom":
+        return 7 - rank_index, file_index
+    if orientation == "black_bottom":
+        return rank_index, 7 - file_index
+    raise ValidationError("camera orientation must be white_bottom or black_bottom")
+
+
+def image_rows_to_board(
+    rows: tuple[str, ...], orientation: str = "white_bottom"
+) -> dict[int, str]:
+    result = {}
+    for image_row, row in enumerate(rows):
+        for image_column, symbol in enumerate(row):
+            result[image_cell_to_square(image_row, image_column, orientation)] = symbol
+    return result
+
+
+def rotate_image_cell(row: int, column: int, rotation: int) -> tuple[int, int]:
+    if not 0 <= row < 8 or not 0 <= column < 8:
+        raise ValidationError("raw image board cell must be inside the 8x8 grid")
+    if rotation == 0:
+        return row, column
+    if rotation == 90:
+        return column, 7 - row
+    if rotation == 180:
+        return 7 - row, 7 - column
+    if rotation == 270:
+        return 7 - column, row
+    raise ValidationError("rotation must be 0, 90, 180, or 270 degrees")
+
+
+def canonical_rows(rows: tuple[str, ...], orientation: str) -> tuple[str, ...]:
+    import chess
+
+    observed = image_rows_to_board(rows, orientation)
+    return tuple(
+        "".join(observed[chess.square(file_index, rank)] for file_index in range(8))
+        for rank in range(7, -1, -1)
+    )
+
+
+def board_symbols(board: Any) -> dict[int, str]:
     return {
-        "dictionary": "DICT_ARUCO_MIP_36h12",
-        "orientation": "camera view: a8 at top-left, h1 at bottom-right",
-        "board_reference_markers": {
-            "0": "top-left",
-            "1": "top-right",
-            "2": "bottom-right",
-            "3": "bottom-left",
-        },
-        "pieces": {str(key): value for key, value in standard_piece_markers().items()},
+        square: (piece.symbol() if piece is not None else ".")
+        for square in range(64)
+        for piece in [board.piece_at(square)]
     }
 
 
-def generate_marker_pack(output_dir: Path, marker_pixels: int = 240) -> dict[str, Any]:
-    if marker_pixels < 80:
-        raise ValidationError("marker size must be at least 80 pixels")
-    cv2, _ = _vision_modules()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    dictionary = aruco_dictionary()
-    manifest = marker_manifest()
-    marker_ids = [*REFERENCE_IDS, *standard_piece_markers().keys()]
-    for marker_id in marker_ids:
-        image = cv2.aruco.generateImageMarker(dictionary, marker_id, marker_pixels)
-        target = output_dir / f"marker-{marker_id:03d}.png"
-        if not cv2.imwrite(str(target), image):
-            raise ConfigurationError(f"could not write {target}")
-    (output_dir / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    return manifest
+def infer_legal_move(board: Any, observed: dict[int, str]) -> Optional[Any]:
+    if observed == board_symbols(board):
+        return None
+    matches = []
+    for move in board.legal_moves:
+        candidate = board.copy(stack=False)
+        candidate.push(move)
+        if board_symbols(candidate) == observed:
+            matches.append(move)
+    if len(matches) != 1:
+        raise ValidationError(
+            "camera position does not match exactly one legal move"
+            if not matches
+            else "camera position matches multiple promotion choices"
+        )
+    return matches[0]
 
 
-def _paste_marker(
-    canvas: Any, marker: Any, center: tuple[int, int], backing: int
-) -> None:
-    cv2, _ = _vision_modules()
-    size = marker.shape[0]
-    outer = size + backing * 2
-    x0 = center[0] - outer // 2
-    y0 = center[1] - outer // 2
-    canvas[y0 : y0 + outer, x0 : x0 + outer] = 255
-    resized = cv2.cvtColor(marker, cv2.COLOR_GRAY2BGR)
-    canvas[
-        y0 + backing : y0 + backing + size,
-        x0 + backing : x0 + backing + size,
-    ] = resized
-
-
-def synthetic_board_frame(
-    *,
-    moves: tuple[str, ...] = (),
-    image_size: int = 1440,
-    perspective: bool = False,
-) -> Any:
+def board_payload(
+    rows: tuple[str, ...], orientation: str, geometry: Optional[Any] = None
+) -> list[dict[str, Any]]:
     import chess
 
-    cv2, numpy = _vision_modules()
-    if image_size < 960:
-        raise ValidationError("synthetic vision frame must be at least 960 pixels")
-    canvas = numpy.full((image_size, image_size, 3), 232, dtype=numpy.uint8)
-    board_start = int(image_size * 0.14)
-    board_end = image_size - board_start
-    square_size = (board_end - board_start) / 8
-    for row in range(8):
-        for column in range(8):
-            color = (218, 225, 230) if (row + column) % 2 == 0 else (82, 112, 128)
-            x0 = round(board_start + column * square_size)
-            y0 = round(board_start + row * square_size)
-            x1 = round(board_start + (column + 1) * square_size)
-            y1 = round(board_start + (row + 1) * square_size)
-            cv2.rectangle(canvas, (x0, y0), (x1, y1), color, -1)
-    dictionary = aruco_dictionary()
-    reference_centers = (
-        (
-            round(board_start - 0.7 * square_size),
-            round(board_start - 0.7 * square_size),
-        ),
-        (round(board_end + 0.7 * square_size), round(board_start - 0.7 * square_size)),
-        (round(board_end + 0.7 * square_size), round(board_end + 0.7 * square_size)),
-        (round(board_start - 0.7 * square_size), round(board_end + 0.7 * square_size)),
-    )
-    reference_size = max(70, round(square_size * 0.56))
-    for marker_id, center in zip(REFERENCE_IDS, reference_centers):
-        marker = cv2.aruco.generateImageMarker(dictionary, marker_id, reference_size)
-        _paste_marker(canvas, marker, center, max(10, reference_size // 4))
-    board = chess.Board()
-    identities = {
-        chess.parse_square(value["start_square"]): marker_id
-        for marker_id, value in standard_piece_markers().items()
-    }
-    for uci in moves:
-        move = chess.Move.from_uci(uci)
-        if move not in board.legal_moves:
-            raise ValidationError(f"illegal synthetic vision move: {uci}")
-        marker_id = identities.pop(move.from_square)
-        capture_square = move.to_square
-        if board.is_en_passant(move):
-            capture_square += -8 if board.turn else 8
-        identities.pop(capture_square, None)
-        if board.is_castling(move):
-            rank = chess.square_rank(move.from_square)
-            if chess.square_file(move.to_square) > chess.square_file(move.from_square):
-                rook_from = chess.square(7, rank)
-                rook_to = chess.square(5, rank)
-            else:
-                rook_from = chess.square(0, rank)
-                rook_to = chess.square(3, rank)
-            identities[rook_to] = identities.pop(rook_from)
-        identities[move.to_square] = marker_id
-        board.push(move)
-    piece_size = max(54, round(square_size * 0.43))
-    for square, marker_id in identities.items():
-        column = chess.square_file(square)
-        row = 7 - chess.square_rank(square)
-        center = (
-            round(board_start + (column + 0.5) * square_size),
-            round(board_start + (row + 0.5) * square_size),
-        )
-        marker = cv2.aruco.generateImageMarker(dictionary, marker_id, piece_size)
-        _paste_marker(canvas, marker, center, max(10, piece_size // 4))
-    if perspective:
-        source = numpy.float32(
-            [
-                [0, 0],
-                [image_size - 1, 0],
-                [image_size - 1, image_size - 1],
-                [0, image_size - 1],
-            ]
-        )
-        destination = numpy.float32(
-            [
-                [image_size * 0.06, image_size * 0.02],
-                [image_size * 0.95, image_size * 0.08],
-                [image_size * 0.98, image_size * 0.94],
-                [image_size * 0.03, image_size * 0.98],
-            ]
-        )
-        transform = cv2.getPerspectiveTransform(source, destination)
-        canvas = cv2.warpPerspective(canvas, transform, (image_size, image_size))
-    return canvas
+    from .kinematics import grid_to_machine
+    from .models import GridPosition
 
-
-@dataclass(frozen=True)
-class VisionEvent:
-    timestamp: str
-    kind: str
-    message: str
-    uci: Optional[str] = None
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "timestamp": self.timestamp,
-            "kind": self.kind,
-            "message": self.message,
-            "uci": self.uci,
+    observed = image_rows_to_board(rows, orientation)
+    payload = []
+    for square, symbol in sorted(observed.items()):
+        if symbol not in PIECE_SYMBOLS:
+            continue
+        file_index = chess.square_file(square)
+        rank_index = chess.square_rank(square)
+        item = {
+            "square": chess.square_name(square),
+            "symbol": symbol,
+            "color": "white" if symbol.isupper() else "black",
+            "type": chess.piece_name(chess.Piece.from_symbol(symbol).piece_type),
+            "grid": {"x": file_index, "y": rank_index},
         }
+        if geometry is not None:
+            machine = grid_to_machine(GridPosition(file_index, rank_index), geometry)
+            item["machine_mm"] = {"x": machine.x, "y": machine.y}
+        payload.append(item)
+    return payload
 
 
-class VisionBoardTracker:
+class SolTranscriber:
     def __init__(
         self,
         *,
-        stable_frames: int = 3,
-        min_marker_side_px: float = 24.0,
-        move_submitter: Optional[Callable[[str, str], None]] = None,
+        api_key: Optional[str] = None,
+        model: str = MODEL,
+        client: Any = None,
     ) -> None:
-        if stable_frames < 1:
-            raise ConfigurationError("vision stable frame count must be positive")
-        if min_marker_side_px < 8:
-            raise ConfigurationError("minimum marker side must be at least 8 pixels")
-        import chess
-
-        self.stable_frames = stable_frames
-        self.min_marker_side_px = float(min_marker_side_px)
-        self._move_submitter = move_submitter or self._submit_to_lichess
-        self._lock = threading.RLock()
-        self._board = chess.Board()
-        self._piece_markers = standard_piece_markers()
-        self._positions = {
-            value["piece_id"]: chess.parse_square(value["start_square"])
-            for value in self._piece_markers.values()
-        }
-        self._piece_types = {
-            value["piece_id"]: value["type"] for value in self._piece_markers.values()
-        }
-        self._candidate: Optional[tuple[tuple[str, int], ...]] = None
-        self._blocked_write_candidate: Optional[tuple[tuple[str, int], ...]] = None
-        self._stable_count = 0
-        self._state = "waiting"
-        self._error: Optional[str] = None
-        self._last_move: Optional[str] = None
-        self._last_move_detail: Optional[dict[str, Any]] = None
-        self._candidates: tuple[str, ...] = ()
-        self._events: list[VisionEvent] = []
-        self._last_observed: dict[str, int] = {}
-        self._reference_error: Optional[float] = None
-        self._board_area_ratio: Optional[float] = None
-        self._marker_sides: dict[int, float] = {}
-        self._frames = 0
-        self._accepted_frames = 0
-        self._started = time.monotonic()
-        self._last_frame_at: Optional[str] = None
-        self._game_id: Optional[str] = None
-        self._write_lichess = False
-        self._fusion_enabled = False
-        self._aux_matrix: Optional[Matrix] = None
-
-    @staticmethod
-    def _submit_to_lichess(game_id: str, uci: str) -> None:
-        import os
-
-        token = os.environ.get("LICHESS_TOKEN", "").strip()
-        if not token:
+        key = api_key or os.environ.get("OPENAI_API_KEY", "").strip()
+        if client is None and not key:
             raise ConfigurationError(
-                "LICHESS_TOKEN is required to submit vision moves through the Lichess Board API"
+                "OPENAI_API_KEY is required for Sol board recognition"
             )
-        lichess_client(token).board.make_move(game_id, uci)
-
-    def _event(self, kind: str, message: str, uci: Optional[str] = None) -> None:
-        self._events.append(
-            VisionEvent(datetime.now(timezone.utc).isoformat(), kind, message, uci)
-        )
-        self._events = self._events[-100:]
-
-    def configure_lichess(self, game_id: Optional[str], write: bool) -> dict[str, Any]:
-        normalized = game_id.strip() if isinstance(game_id, str) else ""
-        if normalized and (not normalized.isalnum() or not 8 <= len(normalized) <= 12):
-            raise ValidationError("Lichess game ID must be 8-12 letters or digits")
-        if write and not normalized:
-            raise ValidationError("a Lichess game ID is required when write is enabled")
-        with self._lock:
-            self._game_id = normalized or None
-            self._write_lichess = bool(write)
-            self._event(
-                "config",
-                f"Vision Lichess writing {'enabled' if write else 'disabled'}"
-                + (f" for {normalized}" if normalized else ""),
-            )
-        return self.status()
-
-    def configure_fusion(self, enabled: bool, matrix: Any = None) -> dict[str, Any]:
-        parsed = validate_matrix(matrix) if matrix is not None else None
-        with self._lock:
-            self._fusion_enabled = bool(enabled)
-            self._aux_matrix = parsed
-            self._event(
-                "fusion", f"Occupancy fusion {'enabled' if enabled else 'disabled'}"
-            )
-        return self.status()
-
-    def set_aux_matrix(self, matrix: Any) -> None:
-        parsed = validate_matrix(matrix)
-        with self._lock:
-            self._aux_matrix = parsed
-
-    def reset(self) -> dict[str, Any]:
-        import chess
-
-        with self._lock:
-            self._board = chess.Board()
-            self._positions = {
-                value["piece_id"]: chess.parse_square(value["start_square"])
-                for value in self._piece_markers.values()
-            }
-            self._piece_types = {
-                value["piece_id"]: value["type"]
-                for value in self._piece_markers.values()
-            }
-            self._candidate = None
-            self._blocked_write_candidate = None
-            self._stable_count = 0
-            self._state = "waiting"
-            self._error = None
-            self._last_move = None
-            self._last_move_detail = None
-            self._candidates = ()
-            self._last_observed = {}
-            self._events = []
-            self._event("reset", "Vision tracker reset to standard position")
-        return self.status()
-
-    def retry(self) -> dict[str, Any]:
-        with self._lock:
-            if self._state != "error" or not self._candidates:
-                raise ValidationError("there is no failed vision move to retry")
-            self._blocked_write_candidate = None
-            self._candidate = None
-            self._stable_count = 0
-            self._state = "waiting"
-            self._error = None
-            self._event(
-                "retry", "Operator requested one retry of the failed vision move"
-            )
-        return self.status()
-
-    def _detect(self, frame: Any) -> tuple[dict[str, int], dict[str, Any]]:
-        import chess
-
-        cv2, numpy = _vision_modules()
-        if frame is None or not hasattr(frame, "shape") or len(frame.shape) < 2:
-            raise ValidationError("camera frame is empty")
-        gray = (
-            cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
-        )
-        parameters = cv2.aruco.DetectorParameters()
-        parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-        parameters.errorCorrectionRate = 0.4
-        detector = cv2.aruco.ArucoDetector(aruco_dictionary(), parameters)
-        corners, ids, rejected = detector.detectMarkers(gray)
-        if ids is None:
-            raise ValidationError("no ArUco markers were detected")
-        detected: dict[int, Any] = {}
-        marker_sides: dict[int, float] = {}
-        for marker_corners, marker_id_value in zip(corners, ids.flatten().tolist()):
-            marker_id = int(marker_id_value)
-            points = marker_corners.reshape(4, 2)
-            side_lengths = [
-                float(numpy.linalg.norm(points[(index + 1) % 4] - points[index]))
-                for index in range(4)
-            ]
-            side = min(side_lengths)
-            if side < self.min_marker_side_px:
-                continue
-            if marker_id in detected:
-                raise ValidationError(f"marker {marker_id} was detected more than once")
-            detected[marker_id] = points
-            marker_sides[marker_id] = side
-        missing_references = [value for value in REFERENCE_IDS if value not in detected]
-        if missing_references:
-            joined = ", ".join(str(value) for value in missing_references)
-            raise ValidationError(f"missing board reference marker(s): {joined}")
-        image_points = numpy.float32(
-            [detected[marker_id].mean(axis=0) for marker_id in REFERENCE_IDS]
-        )
-        if not cv2.isContourConvex(image_points.astype(numpy.int32)):
-            raise ValidationError(
-                "board reference markers do not form a convex quadrilateral"
-            )
-        frame_area = float(frame.shape[0] * frame.shape[1])
-        board_area_ratio = abs(float(cv2.contourArea(image_points))) / frame_area
-        if board_area_ratio < 0.15:
-            raise ValidationError(
-                "board reference markers cover too little of the camera image"
-            )
-        board_points = numpy.float32(REFERENCE_POINTS)
-        homography, _ = cv2.findHomography(image_points, board_points, cv2.RANSAC)
-        if homography is None:
-            raise ValidationError("could not calculate board homography")
-        projected = cv2.perspectiveTransform(
-            image_points.reshape(1, -1, 2), homography
-        )[0]
-        reference_error = float(numpy.sqrt(numpy.mean((projected - board_points) ** 2)))
-        observed: dict[str, int] = {}
-        unknown: list[int] = []
-        boundaries: list[int] = []
-        for marker_id, points in detected.items():
-            if marker_id in REFERENCE_IDS:
-                continue
-            definition = self._piece_markers.get(marker_id)
-            if definition is None:
-                unknown.append(marker_id)
-                continue
-            center = points.mean(axis=0).reshape(1, 1, 2).astype(numpy.float32)
-            board_center = cv2.perspectiveTransform(center, homography)[0][0]
-            column = int(numpy.floor(board_center[0]))
-            row = int(numpy.floor(board_center[1]))
-            fractional = board_center - numpy.floor(board_center)
-            if not 0 <= column < 8 or not 0 <= row < 8:
-                raise ValidationError(f"piece marker {marker_id} is outside the board")
-            if (
-                min(
-                    float(fractional[0]),
-                    float(fractional[1]),
-                    1 - float(fractional[0]),
-                    1 - float(fractional[1]),
-                )
-                < 0.12
-            ):
-                boundaries.append(marker_id)
-                continue
-            square = chess.square(column, 7 - row)
-            piece_id = definition["piece_id"]
-            if square in observed.values():
-                raise ValidationError(
-                    f"more than one piece marker occupies {chess.square_name(square)}"
-                )
-            observed[piece_id] = square
-        if unknown:
-            raise ValidationError(
-                "unknown marker ID(s): "
-                + ", ".join(str(value) for value in sorted(unknown))
-            )
-        if boundaries:
-            raise ValidationError(
-                "marker center is too close to a square boundary: "
-                + ", ".join(str(value) for value in sorted(boundaries))
-            )
-        return observed, {
-            "detected_markers": len(detected),
-            "rejected_candidates": len(rejected),
-            "reference_error": reference_error,
-            "board_area_ratio": board_area_ratio,
-            "marker_sides": marker_sides,
-        }
-
-    def _expected_after(self, move: Any) -> dict[str, int]:
-        import chess
-
-        expected = dict(self._positions)
-        moving_id = next(
-            (
-                piece_id
-                for piece_id, square in expected.items()
-                if square == move.from_square
-            ),
-            None,
-        )
-        if moving_id is None:
-            return {}
-        capture_square = move.to_square
-        if self._board.is_en_passant(move):
-            capture_square += -8 if self._board.turn else 8
-        captured_id = next(
-            (
-                piece_id
-                for piece_id, square in expected.items()
-                if square == capture_square
-            ),
-            None,
-        )
-        if captured_id is not None:
-            del expected[captured_id]
-        expected[moving_id] = move.to_square
-        if self._board.is_castling(move):
-            rank = chess.square_rank(move.from_square)
-            if chess.square_file(move.to_square) > chess.square_file(move.from_square):
-                rook_from = chess.square(7, rank)
-                rook_to = chess.square(5, rank)
-            else:
-                rook_from = chess.square(0, rank)
-                rook_to = chess.square(3, rank)
-            rook_id = next(
-                (
-                    piece_id
-                    for piece_id, square in expected.items()
-                    if square == rook_from
-                ),
-                None,
-            )
-            if rook_id is None:
-                return {}
-            expected[rook_id] = rook_to
-        return expected
-
-    @staticmethod
-    def _square_detail(square: Optional[int]) -> Optional[dict[str, Any]]:
-        if square is None:
-            return None
-        import chess
-
-        x = chess.square_file(square)
-        y = chess.square_rank(square)
-        return {
-            "square": chess.square_name(square),
-            "coordinate": {"x": x, "y": y},
-            "camera_cell": {"row": 7 - y, "column": x},
-        }
-
-    def _move_detail(self, move: Any) -> dict[str, Any]:
-        import chess
-
-        moving_id = next(
-            piece_id
-            for piece_id, square in self._positions.items()
-            if square == move.from_square
-        )
-        capture_square = move.to_square
-        if self._board.is_en_passant(move):
-            capture_square += -8 if self._board.turn else 8
-        captured_id = next(
-            (
-                piece_id
-                for piece_id, square in self._positions.items()
-                if square == capture_square
-            ),
-            None,
-        )
-        detail = {
-            "uci": move.uci(),
-            "piece_id": moving_id,
-            "from": self._square_detail(move.from_square),
-            "to": self._square_detail(move.to_square),
-            "capture": (
-                {
-                    "piece_id": captured_id,
-                    "at": self._square_detail(capture_square),
-                    "en_passant": self._board.is_en_passant(move),
-                }
-                if captured_id is not None
-                else None
-            ),
-            "promotion": (chess.piece_name(move.promotion) if move.promotion else None),
-            "rook_transfer": None,
-        }
-        if self._board.is_castling(move):
-            rank = chess.square_rank(move.from_square)
-            king_side = chess.square_file(move.to_square) > chess.square_file(
-                move.from_square
-            )
-            rook_from = chess.square(7 if king_side else 0, rank)
-            rook_to = chess.square(5 if king_side else 3, rank)
-            rook_id = next(
-                piece_id
-                for piece_id, square in self._positions.items()
-                if square == rook_from
-            )
-            detail["rook_transfer"] = {
-                "piece_id": rook_id,
-                "from": self._square_detail(rook_from),
-                "to": self._square_detail(rook_to),
-            }
-        return detail
-
-    @staticmethod
-    def _matrix_from_positions(positions: Mapping[str, int]) -> Matrix:
-        import chess
-
-        rows = [[0 for _ in range(8)] for _ in range(8)]
-        for square in positions.values():
-            rows[7 - chess.square_rank(square)][chess.square_file(square)] = 1
-        return tuple(tuple(row) for row in rows)
-
-    def _process_stable(self, observed: dict[str, int]) -> None:
-        if self._fusion_enabled:
-            if self._aux_matrix is None:
-                self._state = "conflict"
-                self._error = (
-                    "occupancy fusion is enabled but no 8 x 8 matrix is available"
-                )
-                return
-            if self._matrix_from_positions(observed) != self._aux_matrix:
-                self._state = "conflict"
-                self._error = (
-                    "vision occupancy disagrees with the auxiliary occupancy matrix"
-                )
-                self._event("conflict", self._error)
-                return
-        if observed == self._positions:
-            self._state = "ready"
-            self._error = None
-            self._candidates = ()
-            return
-        matches = []
-        for move in self._board.legal_moves:
-            if self._expected_after(move) == observed:
-                matches.append(move)
-        if len(matches) > 1:
-            promotion_matches = [move for move in matches if move.promotion]
-            same_transfer = (
-                len(promotion_matches) == len(matches)
-                and len({(move.from_square, move.to_square) for move in matches}) == 1
-            )
-            if same_transfer:
-                import chess
-
-                matches = [
-                    move for move in promotion_matches if move.promotion == chess.QUEEN
-                ]
-                self._event(
-                    "promotion",
-                    "Vision could not distinguish promotion type; applied queen policy",
-                    matches[0].uci(),
-                )
-        if len(matches) > 1:
-            self._state = "ambiguous"
-            self._candidates = tuple(move.uci() for move in matches)
-            self._error = "observed pieces match more than one legal move"
-            self._event("ambiguous", self._error)
-            return
-        if not matches:
-            expected_count = len(self._positions)
-            if len(observed) < expected_count - 1:
-                self._state = "moving"
-                self._error = "piece markers are occluded or currently being moved"
-                return
-            self._state = "illegal"
-            self._error = (
-                "stable exact-piece position is not the current board or one legal move"
-            )
-            self._event("illegal", self._error)
-            return
-        move = matches[0]
-        uci = move.uci()
-        move_detail = self._move_detail(move)
-        try:
-            if self._write_lichess:
-                if self._game_id is None:
-                    raise ConfigurationError(
-                        "set a Lichess game ID before enabling writes"
-                    )
-                self._move_submitter(self._game_id, uci)
-                self._event(
-                    "lichess", f"Submitted vision move {uci} to {self._game_id}", uci
-                )
-            self._positions = self._expected_after(move)
-            if move.promotion:
-                import chess
-
-                self._piece_types[move_detail["piece_id"]] = chess.piece_name(
-                    move.promotion
-                )
-            self._board.push(move)
-            self._last_move = uci
-            self._last_move_detail = move_detail
-            self._candidates = (uci,)
-            self._state = "move"
-            self._error = None
-            self._event("move", f"Detected exact-piece move {uci}", uci)
-        except Exception as exc:
-            self._blocked_write_candidate = tuple(sorted(observed.items()))
-            self._state = "error"
-            self._error = str(exc)
-            self._candidates = (uci,)
-            self._event("error", f"Detected {uci} but submission failed: {exc}", uci)
-
-    def process_frame(self, frame: Any) -> dict[str, Any]:
-        with self._lock:
-            self._frames += 1
-            self._last_frame_at = datetime.now(timezone.utc).isoformat()
+        if client is None:
             try:
-                observed, diagnostics = self._detect(frame)
-                fingerprint = tuple(sorted(observed.items()))
-                self._reference_error = diagnostics["reference_error"]
-                self._board_area_ratio = diagnostics["board_area_ratio"]
-                self._marker_sides = diagnostics["marker_sides"]
-                self._last_observed = observed
-                self._accepted_frames += 1
-                if fingerprint == self._candidate:
-                    self._stable_count += 1
-                else:
-                    self._candidate = fingerprint
-                    self._stable_count = 1
-                if fingerprint == self._blocked_write_candidate:
-                    self._state = "error"
-                    self._error = (
-                        "vision move write outcome is uncertain; verify the remote game "
-                        "before requesting one retry"
-                    )
-                    return self.status()
-                if self._stable_count == self.stable_frames:
-                    self._process_stable(observed)
-            except ValidationError as exc:
-                self._candidate = None
-                self._stable_count = 0
-                self._state = "waiting"
-                self._error = str(exc)
-            return self.status()
+                import httpx
+                from openai import OpenAI
+            except ImportError as exc:
+                raise ConfigurationError(
+                    "OpenAI vision dependencies are not installed; run uv sync"
+                ) from exc
+            client = OpenAI(
+                api_key=key,
+                timeout=httpx.Timeout(
+                    35.0, connect=5.0, read=30.0, write=30.0, pool=5.0
+                ),
+                max_retries=1,
+            )
+        self.client = client
+        self.model = model
 
-    def status(self) -> dict[str, Any]:
-        import chess
-
-        with self._lock:
-            elapsed = max(time.monotonic() - self._started, 0.001)
-            piece_comparison = []
-            for marker_id, definition in sorted(self._piece_markers.items()):
-                piece_id = definition["piece_id"]
-                expected_square = self._positions.get(piece_id)
-                observed_square = self._last_observed.get(piece_id)
-                if expected_square is None and observed_square is None:
-                    piece_state = "captured"
-                elif expected_square is None:
-                    piece_state = "unexpected"
-                elif observed_square is None:
-                    piece_state = "missing"
-                elif expected_square == observed_square:
-                    piece_state = "matched"
-                else:
-                    piece_state = "moved"
-                expected = self._square_detail(expected_square)
-                observed = self._square_detail(observed_square)
-                piece_comparison.append(
-                    {
-                        "marker_id": marker_id,
-                        "piece_id": piece_id,
-                        "color": definition["color"],
-                        "type": self._piece_types[piece_id],
-                        "starting_type": definition["type"],
-                        "state": piece_state,
-                        "expected_square": expected["square"] if expected else None,
-                        "expected_coordinate": (
-                            expected["coordinate"] if expected else None
-                        ),
-                        "observed_square": observed["square"] if observed else None,
-                        "observed_coordinate": (
-                            observed["coordinate"] if observed else None
-                        ),
-                        "camera_cell": observed["camera_cell"] if observed else None,
-                        "marker_side_px": (
-                            round(self._marker_sides[marker_id], 1)
-                            if marker_id in self._marker_sides
-                            else None
-                        ),
-                    }
-                )
-            observed = [
+    def transcribe(self, jpeg: bytes) -> BoardTranscription:
+        data_url = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
+        response = self.client.responses.parse(
+            model=self.model,
+            input=[
+                {"role": "developer", "content": SYSTEM_PROMPT},
                 {
-                    "marker_id": value["marker_id"],
-                    "piece_id": value["piece_id"],
-                    "color": value["color"],
-                    "type": value["type"],
-                    "square": value["observed_square"],
-                    "coordinate": value["observed_coordinate"],
-                    "camera_cell": value["camera_cell"],
-                    "marker_side_px": value["marker_side_px"],
-                }
-                for value in piece_comparison
-                if value["observed_square"] is not None
-            ]
-            return {
-                "state": self._state,
-                "error": self._error,
-                "last_move": self._last_move,
-                "last_move_detail": self._last_move_detail,
-                "candidates": list(self._candidates),
-                "fen": self._board.fen(),
-                "turn": "white" if self._board.turn else "black",
-                "stable_frames": self._stable_count,
-                "stable_frames_required": self.stable_frames,
-                "frames": self._frames,
-                "accepted_frames": self._accepted_frames,
-                "frame_hz_observed": round(self._frames / elapsed, 2),
-                "last_frame_at": self._last_frame_at,
-                "reference_error": self._reference_error,
-                "board_area_ratio": self._board_area_ratio,
-                "smallest_marker_px": (
-                    round(min(self._marker_sides.values()), 1)
-                    if self._marker_sides
-                    else None
-                ),
-                "observed_pieces": observed,
-                "piece_comparison": piece_comparison,
-                "piece_disagreements": sum(
-                    value["state"] not in {"matched", "captured"}
-                    for value in piece_comparison
-                ),
-                "expected_piece_count": len(self._positions),
-                "observed_piece_count": len(self._last_observed),
-                "fusion_enabled": self._fusion_enabled,
-                "fusion_matrix_available": self._aux_matrix is not None,
-                "game_id": self._game_id,
-                "write_lichess": self._write_lichess,
-                "events": [event.as_dict() for event in self._events],
-            }
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Transcribe this physical chessboard.",
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": data_url,
+                            "detail": "original",
+                        },
+                    ],
+                },
+            ],
+            text_format=BoardTranscription,
+            reasoning={"effort": "none"},
+            max_output_tokens=700,
+            store=False,
+        )
+        parsed = response.output_parsed
+        if response.status != "completed" or parsed is None:
+            raise ValidationError(
+                f"Sol did not return a complete board transcription: {response.status}"
+            )
+        return parsed
 
 
-class _DemoFrameSource:
-    def __init__(self, moves: tuple[str, ...] = ()) -> None:
-        self.frame = synthetic_board_frame(moves=moves, perspective=True)
-
-    def read(self) -> Any:
-        return self.frame.copy()
-
-    def close(self) -> None:
-        return None
-
-
-class _ImageFrameSource:
+class _ImageSource:
     def __init__(self, path: Path) -> None:
         cv2, _ = _vision_modules()
         self.frame = cv2.imread(str(path))
@@ -848,37 +377,118 @@ class _ImageFrameSource:
         return None
 
 
-class _SnapshotFrameSource:
+class _SnapshotSource:
     def __init__(self, url: str) -> None:
         self.url = url
 
     def read(self) -> Any:
         cv2, numpy = _vision_modules()
-        request = Request(
-            self.url,
-            headers={"Cache-Control": "no-cache", "User-Agent": "ChessGantry/0.2"},
-        )
-        with urlopen(request, timeout=3) as response:
-            payload = response.read(12_000_000)
-        frame = cv2.imdecode(
-            numpy.frombuffer(payload, dtype=numpy.uint8), cv2.IMREAD_COLOR
-        )
-        if frame is None:
-            raise ValidationError("phone snapshot endpoint did not return a JPEG image")
-        return frame
+        errors = []
+        for attempt in range(3):
+            request = Request(
+                f"{self.url}{'&' if '?' in self.url else '?'}_={time.time_ns()}",
+                headers={
+                    "Cache-Control": "no-cache, no-store",
+                    "Pragma": "no-cache",
+                    "Connection": "close",
+                    "User-Agent": "ChessGantry/1",
+                },
+            )
+            try:
+                with urlopen(request, timeout=5) as response:
+                    content_type = response.headers.get_content_type()
+                    payload = response.read(15_000_000)
+                if content_type not in {"image/jpeg", "image/jpg", "image/png"}:
+                    raise ValidationError(
+                        f"snapshot endpoint returned {content_type}, not an image"
+                    )
+                frame = cv2.imdecode(
+                    numpy.frombuffer(payload, dtype=numpy.uint8), cv2.IMREAD_COLOR
+                )
+                if frame is None:
+                    raise ValidationError(
+                        "snapshot endpoint did not return a supported image"
+                    )
+                return frame
+            except Exception as exc:
+                errors.append(str(exc))
+                if attempt < 2:
+                    time.sleep(0.25 * (attempt + 1))
+        raise ValidationError("snapshot failed after 3 attempts: " + " | ".join(errors))
 
     def close(self) -> None:
         return None
 
 
-class _VideoFrameSource:
+class _MjpegSource:
+    def __init__(self, url: str, opener: Callable[..., Any] = urlopen) -> None:
+        self.url = url
+        self._opener = opener
+        self._response: Any = None
+        self._buffer = bytearray()
+
+    def _connect(self) -> None:
+        request = Request(
+            self.url,
+            headers={
+                "Cache-Control": "no-cache, no-store",
+                "Pragma": "no-cache",
+                "Connection": "close",
+                "User-Agent": "ChessGantry/1",
+            },
+        )
+        response = self._opener(request, timeout=6)
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "multipart/" not in content_type and "mjpeg" not in content_type:
+            response.close()
+            raise ValidationError(
+                f"MJPEG endpoint returned {content_type or 'unknown content type'}"
+            )
+        self._response = response
+
+    def read(self) -> Any:
+        cv2, numpy = _vision_modules()
+        if self._response is None:
+            self._connect()
+        deadline = time.monotonic() + 7.0
+        while time.monotonic() < deadline:
+            start = self._buffer.find(b"\xff\xd8")
+            if start >= 0:
+                end = self._buffer.find(b"\xff\xd9", start + 2)
+                if end >= 0:
+                    payload = bytes(self._buffer[start : end + 2])
+                    del self._buffer[: end + 2]
+                    frame = cv2.imdecode(
+                        numpy.frombuffer(payload, dtype=numpy.uint8), cv2.IMREAD_COLOR
+                    )
+                    if frame is not None:
+                        return frame
+            read_available = getattr(self._response, "read1", self._response.read)
+            chunk = read_available(16_384)
+            if not chunk:
+                raise ValidationError("MJPEG stream ended before the next frame")
+            self._buffer.extend(chunk)
+            if len(self._buffer) > 20_000_000:
+                del self._buffer[:-2_000_000]
+        raise ValidationError(
+            "MJPEG stream timed out waiting for a complete JPEG frame"
+        )
+
+    def close(self) -> None:
+        if self._response is not None:
+            self._response.close()
+            self._response = None
+        self._buffer.clear()
+
+
+class _VideoSource:
     def __init__(self, source: str) -> None:
         cv2, _ = _vision_modules()
         value: Any = int(source) if source.isdigit() else source
         self.capture = cv2.VideoCapture()
         self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        self.capture.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)
-        self.capture.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000)
+        self.capture.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
+        self.capture.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
         if not self.capture.open(value):
             self.capture.release()
             raise ValidationError(f"could not open camera source {source}")
@@ -893,142 +503,513 @@ class _VideoFrameSource:
         self.capture.release()
 
 
+class _AutoSource:
+    def __init__(self, base_url: str) -> None:
+        base = base_url.rstrip("/")
+        self.candidates = (
+            f"snapshot:{base}/shot.jpg",
+            f"{base}/video",
+        )
+        self.reader: Any = None
+        self.resolved_source: Optional[str] = None
+
+    def read(self) -> Any:
+        if self.reader is not None:
+            try:
+                return self.reader.read()
+            except Exception:
+                self.reader.close()
+                self.reader = None
+                self.resolved_source = None
+        errors = []
+        for candidate in self.candidates:
+            try:
+                reader = open_frame_source(candidate)
+                frame = reader.read()
+                self.reader = reader
+                self.resolved_source = candidate
+                return frame
+            except Exception as exc:
+                errors.append(f"{candidate}: {exc}")
+        raise ValidationError("phone camera endpoints failed: " + " | ".join(errors))
+
+    def close(self) -> None:
+        if self.reader is not None:
+            self.reader.close()
+            self.reader = None
+
+
 def open_frame_source(source: str) -> Any:
     normalized = source.strip()
     if not normalized:
         raise ValidationError("camera source is required")
-    if normalized == "demo":
-        return _DemoFrameSource()
-    if normalized.startswith("demo:"):
-        moves = tuple(item for item in normalized[5:].split(",") if item)
-        return _DemoFrameSource(moves)
+    if normalized.startswith("auto:"):
+        return _AutoSource(normalized[5:])
+    if normalized.startswith("browser:"):
+        raise ValidationError(
+            "browser camera sources receive frames through the web UI"
+        )
     if normalized.startswith("snapshot:"):
-        return _SnapshotFrameSource(normalized[len("snapshot:") :])
+        return _SnapshotSource(normalized[9:])
+    if normalized.startswith(("http://", "https://")):
+        return _MjpegSource(normalized)
     path = Path(normalized)
     if path.is_file():
-        return _ImageFrameSource(path)
-    return _VideoFrameSource(normalized)
+        return _ImageSource(path)
+    return _VideoSource(normalized)
 
 
-class VisionManager:
+def probe_camera_source(
+    source: str, source_factory: Callable[[str], Any] = open_frame_source
+) -> dict[str, Any]:
+    started = time.monotonic()
+    probe_source = source
+    if source.startswith("browser:"):
+        probe_source = f"snapshot:{source[8:].rstrip('/')}/shot.jpg"
+    reader = source_factory(probe_source)
+    try:
+        frame = reader.read()
+        height, width = frame.shape[:2]
+        jpeg = encode_jpeg(frame)
+        return {
+            "ok": True,
+            "source": source,
+            "resolved_source": getattr(reader, "resolved_source", probe_source),
+            "width": width,
+            "height": height,
+            "latency_ms": round((time.monotonic() - started) * 1000, 1),
+            "jpeg": jpeg,
+        }
+    finally:
+        reader.close()
+
+
+class SolVisionManager:
     def __init__(
         self,
         *,
-        source: str = "",
-        enabled: bool = False,
-        frame_hz: float = 5.0,
-        tracker: Optional[VisionBoardTracker] = None,
-        occupancy_provider: Optional[Callable[[], Any]] = None,
+        source: str = DEFAULT_PHONE_SOURCE,
+        orientation: str = "white_bottom",
+        rotation: int = 0,
+        interval_s: float = 3.0,
+        transcriber: Optional[Any] = None,
+        move_handler: Optional[Callable[[str], None]] = None,
+        geometry: Optional[Any] = None,
+        calibration_path: Optional[Path] = None,
+        source_factory: Callable[[str], Any] = open_frame_source,
     ) -> None:
-        if not 0.2 <= frame_hz <= 30:
-            raise ConfigurationError("vision frame rate must be between 0.2 and 30 Hz")
-        self.tracker = tracker or VisionBoardTracker()
-        self._occupancy_provider = occupancy_provider
-        self.frame_hz = float(frame_hz)
+        if interval_s < 1:
+            raise ConfigurationError("Sol scan interval must be at least one second")
         self._lock = threading.RLock()
         self._stop = threading.Event()
-        self._wake = threading.Event()
-        self._source = source.strip()
-        self._enabled = bool(enabled and self._source)
+        self._capture_wake = threading.Event()
+        self._inference_wake = threading.Event()
+        self._source = source
+        self._orientation = orientation
+        self._rotation = rotation
+        self._interval = interval_s
+        self._transcriber = transcriber
+        self._move_handler = move_handler
+        self._geometry = geometry
+        self._calibration_path = calibration_path
+        self._source_factory = source_factory
+        self._enabled = False
         self._running = False
-        self._source_error: Optional[str] = None
+        self._reader: Any = None
+        self._active_source: Optional[str] = None
+        self._resolved_source: Optional[str] = None
+        self._raw_jpeg: Optional[bytes] = None
         self._latest_jpeg: Optional[bytes] = None
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
+        self._capture_error: Optional[str] = None
+        self._inference_error: Optional[str] = None
+        self._transcription: Optional[BoardTranscription] = None
+        self._candidate: Optional[tuple[str, ...]] = None
+        self._stable = 0
+        self._board: Any = None
+        self._last_move: Optional[str] = None
+        self._paused = False
+        self._frames = 0
+        self._requests = 0
+        self._frame_generation = 0
+        self._inferred_generation = 0
+        self._last_frame_at: Optional[float] = None
+        self._consecutive_errors = 0
+        self._calibration: Optional[tuple[tuple[float, float], ...]] = None
+        if calibration_path is not None and calibration_path.exists():
+            raw = read_json(calibration_path)
+            self._calibration = validate_calibration(raw.get("corners"))
+            self._rotation = int(raw.get("rotation", self._rotation))
+            self._orientation = str(raw.get("orientation", self._orientation))
+        self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._inference_thread = threading.Thread(
+            target=self._inference_loop, daemon=True
+        )
+        self._capture_thread.start()
+        self._inference_thread.start()
 
-    def configure(self, source: str, enabled: bool) -> dict[str, Any]:
-        normalized = source.strip() if isinstance(source, str) else ""
-        if enabled and not normalized:
-            raise ValidationError("camera source is required when vision is enabled")
-        if len(normalized) > 2048:
-            raise ValidationError("camera source is too long")
+    def configure(
+        self,
+        *,
+        source: str,
+        enabled: bool,
+        orientation: Optional[str] = None,
+        rotation: Optional[int] = None,
+    ) -> dict[str, Any]:
+        if enabled and not source.strip():
+            raise ValidationError("camera source is required")
+        if orientation is not None and orientation not in {
+            "white_bottom",
+            "black_bottom",
+        }:
+            raise ValidationError("orientation must be white_bottom or black_bottom")
+        if rotation is not None and rotation not in {0, 90, 180, 270}:
+            raise ValidationError("rotation must be 0, 90, 180, or 270 degrees")
         with self._lock:
-            self._source = normalized
-            self._enabled = bool(enabled)
-            self._source_error = None
-        self._wake.set()
+            changed = source.strip() != self._source
+            rotation_changed = rotation is not None and rotation != self._rotation
+            self._source = source.strip()
+            self._enabled = enabled
+            if orientation is not None:
+                self._orientation = orientation
+            if rotation is not None:
+                self._rotation = rotation
+            if changed or rotation_changed:
+                self._calibration = None
+                if self._calibration_path is not None:
+                    self._calibration_path.unlink(missing_ok=True)
+            self._capture_error = None
+            self._inference_error = None
+        self._capture_wake.set()
+        self._inference_wake.set()
         return self.status()
 
-    def close(self) -> None:
-        self._stop.set()
-        self._wake.set()
-        self._thread.join(timeout=5)
+    def start_game(self, fen: Optional[str] = None) -> dict[str, Any]:
+        import chess
+
+        with self._lock:
+            self._board = chess.Board(fen) if fen else chess.Board()
+            self._candidate = None
+            self._stable = 0
+            self._last_move = None
+            self._inference_error = None
+        return self.status()
+
+    def apply_expected_move(self, uci: str) -> dict[str, Any]:
+        import chess
+
+        with self._lock:
+            if self._board is None:
+                self._board = chess.Board()
+            move = chess.Move.from_uci(uci)
+            if move not in self._board.legal_moves:
+                raise ValidationError(
+                    f"expected move {uci} is illegal in the current camera game"
+                )
+            self._board.push(move)
+            self._candidate = None
+            self._stable = 0
+        return self.status()
+
+    def set_move_handler(self, handler: Optional[Callable[[str], None]]) -> None:
+        with self._lock:
+            self._move_handler = handler
+
+    def pause_inference(self, paused: bool) -> None:
+        with self._lock:
+            self._paused = bool(paused)
 
     def preview_jpeg(self) -> bytes:
         with self._lock:
             if self._latest_jpeg is None:
-                raise ValidationError("no camera preview frame is available")
+                raise ValidationError("no camera frame is available")
             return self._latest_jpeg
 
-    def _loop(self) -> None:
-        active_source = ""
-        reader: Any = None
+    def raw_preview_jpeg(self) -> bytes:
+        with self._lock:
+            if self._raw_jpeg is None:
+                raise ValidationError("no raw camera frame is available")
+            return self._raw_jpeg
+
+    def ingest_browser_jpeg(self, payload: bytes) -> dict[str, Any]:
+        cv2, numpy = _vision_modules()
+        if not payload or len(payload) > 8_000_000:
+            raise ValidationError("browser camera JPEG must be between 1 byte and 8 MB")
+        frame = cv2.imdecode(
+            numpy.frombuffer(payload, dtype=numpy.uint8), cv2.IMREAD_COLOR
+        )
+        if frame is None:
+            raise ValidationError("browser camera upload is not a valid JPEG")
+        self._store_frame(frame, already_rotated=True)
+        return self.status()
+
+    def probe(self, source: str) -> dict[str, Any]:
+        result = probe_camera_source(source, self._source_factory)
+        jpeg = result.pop("jpeg")
+        with self._lock:
+            self._raw_jpeg = jpeg
+            self._latest_jpeg = jpeg
+            self._last_frame_at = time.time()
+            self._frames += 1
+            self._frame_generation += 1
+            self._capture_error = None
+            self._resolved_source = result["resolved_source"]
+        return result
+
+    def calibrate(self, corners: Any) -> dict[str, Any]:
+        parsed = validate_calibration(corners)
+        with self._lock:
+            self._calibration = parsed
+            self._candidate = None
+            self._stable = 0
+            if self._calibration_path is not None:
+                atomic_write_json(
+                    self._calibration_path,
+                    {
+                        "schema_version": 1,
+                        "orientation": self._orientation,
+                        "rotation": self._rotation,
+                        "corners": [{"x": x, "y": y} for x, y in parsed],
+                    },
+                )
+        self._capture_wake.set()
+        self._inference_wake.set()
+        return self.status()
+
+    def clear_calibration(self) -> dict[str, Any]:
+        with self._lock:
+            self._calibration = None
+            self._candidate = None
+            self._stable = 0
+            if self._calibration_path is not None:
+                self._calibration_path.unlink(missing_ok=True)
+        self._capture_wake.set()
+        self._inference_wake.set()
+        return self.status()
+
+    def _get_transcriber(self) -> Any:
+        if self._transcriber is None:
+            self._transcriber = SolTranscriber()
+        return self._transcriber
+
+    def _store_frame(self, frame: Any, *, already_rotated: bool = False) -> None:
+        cv2, _ = _vision_modules()
+        if not already_rotated:
+            if self._rotation == 90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            elif self._rotation == 180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+            elif self._rotation == 270:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        raw_jpeg = encode_jpeg(frame)
+        plan_frame = (
+            warp_board_frame(frame, self._calibration)
+            if self._calibration is not None
+            else frame
+        )
+        plan_jpeg = encode_jpeg(plan_frame)
+        with self._lock:
+            self._raw_jpeg = raw_jpeg
+            self._latest_jpeg = plan_jpeg
+            self._frames += 1
+            self._frame_generation += 1
+            self._last_frame_at = time.time()
+            self._consecutive_errors = 0
+            self._running = True
+            self._capture_error = None
+            self._resolved_source = self._source
+        self._inference_wake.set()
+
+    def _accept(self, result: BoardTranscription) -> None:
+        rows = result.rows.values()
+        if result.status != "complete":
+            self._candidate = None
+            self._stable = 0
+            return
+        if rows == self._candidate:
+            self._stable += 1
+        else:
+            self._candidate = rows
+            self._stable = 1
+        if self._stable != 2 or self._board is None or self._paused:
+            return
+        observed = image_rows_to_board(rows, self._orientation)
+        move = infer_legal_move(self._board, observed)
+        if move is None:
+            return
+        uci = move.uci()
+        if self._move_handler is not None:
+            self._move_handler(uci)
+        self._board.push(move)
+        self._last_move = uci
+
+    def _capture_loop(self) -> None:
         while not self._stop.is_set():
             with self._lock:
                 enabled = self._enabled
                 source = self._source
             if not enabled:
-                if reader is not None:
-                    reader.close()
-                    reader = None
-                active_source = ""
                 with self._lock:
                     self._running = False
-                self._wake.wait(0.5)
-                self._wake.clear()
+                if self._reader is not None:
+                    self._reader.close()
+                    self._reader = None
+                    self._active_source = None
+                self._capture_wake.wait(0.5)
+                self._capture_wake.clear()
+                continue
+            if source.startswith("browser:"):
+                with self._lock:
+                    self._running = (
+                        self._last_frame_at is not None
+                        and time.time() - self._last_frame_at <= 3.0
+                    )
+                    if not self._running and self._last_frame_at is not None:
+                        self._capture_error = (
+                            "browser camera bridge stopped sending frames"
+                        )
+                self._capture_wake.wait(0.5)
+                self._capture_wake.clear()
                 continue
             try:
-                if reader is None or source != active_source:
-                    if reader is not None:
-                        reader.close()
-                    reader = open_frame_source(source)
-                    active_source = source
+                if self._reader is None or source != self._active_source:
+                    if self._reader is not None:
+                        self._reader.close()
+                    self._reader = self._source_factory(source)
+                    self._active_source = source
+                frame = self._reader.read()
+                self._store_frame(frame)
                 with self._lock:
-                    self._running = True
-                    self._source_error = None
-                frame = reader.read()
-                cv2, _ = _vision_modules()
-                height, width = frame.shape[:2]
-                preview = frame
-                if width > 960:
-                    preview = cv2.resize(frame, (960, round(height * 960 / width)))
-                ok, encoded = cv2.imencode(
-                    ".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 78]
-                )
-                if ok:
-                    with self._lock:
-                        self._latest_jpeg = encoded.tobytes()
-                if self._occupancy_provider is not None:
-                    self.tracker.set_aux_matrix(self._occupancy_provider())
-                self.tracker.process_frame(frame)
-                self._wake.wait(1.0 / self.frame_hz)
-                self._wake.clear()
+                    self._resolved_source = getattr(
+                        self._reader, "resolved_source", source
+                    )
             except Exception as exc:
-                if reader is not None:
-                    reader.close()
-                    reader = None
-                active_source = ""
                 with self._lock:
+                    self._capture_error = str(exc)
                     self._running = False
-                    self._source_error = str(exc)
-                self._wake.wait(1.0)
-                self._wake.clear()
-        if reader is not None:
-            reader.close()
-        with self._lock:
-            self._running = False
+                    self._consecutive_errors += 1
+                if self._reader is not None:
+                    self._reader.close()
+                    self._reader = None
+                    self._active_source = None
+                    self._resolved_source = None
+                self._capture_wake.wait(min(5.0, 0.5 * self._consecutive_errors))
+                self._capture_wake.clear()
+                continue
+            delay = 1.0 if source.startswith("snapshot:") else 0.03
+            self._capture_wake.wait(delay)
+            self._capture_wake.clear()
+        if self._reader is not None:
+            self._reader.close()
+
+    def _inference_loop(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                enabled = self._enabled
+                paused = self._paused
+                generation = self._frame_generation
+                jpeg = self._latest_jpeg
+            if (
+                not enabled
+                or paused
+                or jpeg is None
+                or generation == self._inferred_generation
+            ):
+                self._inference_wake.wait(0.5)
+                self._inference_wake.clear()
+                continue
+            if (
+                self._transcriber is None
+                and not os.environ.get("OPENAI_API_KEY", "").strip()
+            ):
+                with self._lock:
+                    self._inference_error = "OPENAI_API_KEY is required for Sol recognition; camera preview is connected"
+                self._inference_wake.wait(self._interval)
+                self._inference_wake.clear()
+                continue
+            try:
+                result = self._get_transcriber().transcribe(jpeg)
+                with self._lock:
+                    self._requests += 1
+                    self._inferred_generation = generation
+                    self._transcription = result
+                    self._inference_error = None
+                    self._accept(result)
+            except Exception as exc:
+                with self._lock:
+                    self._inferred_generation = generation
+                    self._inference_error = str(exc)
+            self._inference_wake.wait(self._interval)
+            self._inference_wake.clear()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._capture_wake.set()
+        self._inference_wake.set()
+        self._capture_thread.join(timeout=6)
+        self._inference_thread.join(timeout=40)
 
     def status(self) -> dict[str, Any]:
+        import chess
+
         with self._lock:
-            value = self.tracker.status()
-            value.update(
-                {
-                    "enabled": self._enabled,
-                    "running": self._running,
-                    "source": self._source,
-                    "source_error": self._source_error,
-                    "frame_hz_target": self.frame_hz,
-                    "method": "unique ArUco MIP 36h12 piece tags with four board references",
-                }
-            )
-            return value
+            result = self._transcription
+            rows = result.rows.values() if result is not None else None
+            standard_match = False
+            if rows and result is not None and result.status == "complete":
+                standard_match = image_rows_to_board(
+                    rows, self._orientation
+                ) == board_symbols(chess.Board())
+            return {
+                "enabled": self._enabled,
+                "running": self._running,
+                "source": self._source,
+                "orientation": self._orientation,
+                "rotation": self._rotation,
+                "model": MODEL,
+                "error": self._capture_error or self._inference_error,
+                "capture_error": self._capture_error,
+                "inference_error": self._inference_error,
+                "resolved_source": self._resolved_source,
+                "status": result.status if result else "idle",
+                "confidence": result.confidence.model_dump() if result else None,
+                "problems": list(result.problems) if result else [],
+                "image_rows": list(rows) if rows else None,
+                "rows": list(canonical_rows(rows, self._orientation)) if rows else None,
+                "pieces": (
+                    board_payload(rows, self._orientation, self._geometry)
+                    if rows
+                    else []
+                ),
+                "stable_observations": self._stable,
+                "last_move": self._last_move,
+                "fen": self._board.fen() if self._board is not None else None,
+                "turn": (
+                    ("white" if self._board.turn == chess.WHITE else "black")
+                    if self._board
+                    else None
+                ),
+                "matches_standard_position": standard_match,
+                "frames": self._frames,
+                "requests": self._requests,
+                "paused": self._paused,
+                "last_frame_at": self._last_frame_at,
+                "frame_age_s": (
+                    round(max(0.0, time.time() - self._last_frame_at), 3)
+                    if self._last_frame_at is not None
+                    else None
+                ),
+                "stale": (
+                    self._last_frame_at is None
+                    or time.time() - self._last_frame_at > 3.0
+                ),
+                "consecutive_errors": self._consecutive_errors,
+                "calibrated": self._calibration is not None,
+                "calibration": (
+                    [{"x": x, "y": y} for x, y in self._calibration]
+                    if self._calibration
+                    else None
+                ),
+            }
+
+
+VisionManager = SolVisionManager

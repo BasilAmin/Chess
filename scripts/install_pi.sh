@@ -40,28 +40,9 @@ if ! command -v docker > /dev/null 2>&1; then
   trap - EXIT
 fi
 
-sudo apt-get update
-sudo apt-get install -y i2c-tools
-
-BOOT_CONFIG=/boot/firmware/config.txt
-if [[ ! -f $BOOT_CONFIG ]]; then
-  BOOT_CONFIG=/boot/config.txt
-fi
-I2C_REBOOT_REQUIRED=0
-if [[ -f $BOOT_CONFIG ]] && ! grep -qE '^dtparam=i2c_arm=on([[:space:]]|$)' "$BOOT_CONFIG"; then
-  printf '\n# Chess Gantry MCP23017\ndtparam=i2c_arm=on\n' | sudo tee -a "$BOOT_CONFIG" > /dev/null
-  printf 'Enabled Raspberry Pi I2C in %s. Reboot before starting the reed switch test.\n' "$BOOT_CONFIG"
-  I2C_REBOOT_REQUIRED=1
-fi
-
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER"
 sudo usermod -aG dialout "$USER"
-
-if [[ $I2C_REBOOT_REQUIRED -eq 1 ]]; then
-  printf 'Reboot now, then rerun ./scripts/install_pi.sh to build and start the container.\n'
-  exit 0
-fi
 
 if [[ ! -f config.json ]]; then
   cp config.example.json config.json
@@ -73,13 +54,6 @@ if [[ ! -f data/board_state.json ]]; then
 fi
 
 SERIAL_DEVICE="${CHESS_GANTRY_SERIAL_PORT:-/dev/ttyUSB0}"
-I2C_DEVICE="${CHESS_GANTRY_I2C_DEVICE:-/dev/i2c-1}"
-
-if [[ -z "${CLERK_PUBLISHABLE_KEY:-}" ]]; then
-  printf 'CLERK_PUBLISHABLE_KEY is not set. The dashboard authenticates with Clerk only.\n' >&2
-  printf 'Export it before running this installer.\n' >&2
-  exit 2
-fi
 
 DOCKER=(docker)
 if ! docker info > /dev/null 2>&1; then
@@ -96,9 +70,8 @@ cat << EOF
 
 Chess Gantry Docker installation complete.
 
-Detected devices:
-  serial: $SERIAL_DEVICE
-  I2C:    $I2C_DEVICE
+Detected serial device:
+  $SERIAL_DEVICE
 
 Start the dashboard with:
   ./run.sh
@@ -107,6 +80,6 @@ Dashboard address after run.sh starts:
   http://$LAN_IP/
 
 The current user was added to the docker and dialout groups. Log out and back in
-before using Docker without sudo. Export CLERK_PUBLISHABLE_KEY before running
-run.sh; the deployment script contains no built-in Clerk credentials.
+before using Docker without sudo. Export OPENAI_API_KEY before starting Sol
+board recognition. The default phone source is snapshot:http://192.168.100.88:8080/shot.jpg.
 EOF

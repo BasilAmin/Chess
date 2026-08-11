@@ -2,87 +2,241 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import json
+import re
+import subprocess
 import threading
 import unittest
 import urllib.error
 import urllib.request
 
+from chess_gantry.clerk_auth import ClerkSettings, render_dashboard
 from chess_gantry.config import AppConfig
 from chess_gantry.controller import GantryController
-from chess_gantry.errors import ValidationError
+from chess_gantry.errors import ConfigurationError, ValidationError
 from chess_gantry.models import BoardState
-from chess_gantry.live_game import LiveGameManager
-from chess_gantry.operations import OperationManager, OperationSpec
-from chess_gantry.reed_switch import SimulatedReedSwitch
 from chess_gantry.persistence import atomic_write_json
 from chess_gantry.service import GantryService
-from chess_gantry.web_app import HTML, GantryHTTPServer, RequestHandler
-from chess_gantry.clerk_auth import ClerkSettings, render_dashboard
-from chess_gantry.board_sensor import SyntheticBoardSensor
-from chess_gantry.vision import VisionManager
+from chess_gantry.web_app import (
+    HTML,
+    GantryHTTPServer,
+    RequestHandler,
+    web_clerk_settings,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CLERK_ENVIRONMENT = {"CLERK_PUBLISHABLE_KEY": "pk_test_Y2xlcmsuZXhhbXBsZS5jb20k"}
 
 
-class StubClerkVerifier:
-    def __init__(self, accepted: str) -> None:
-        self.accepted = accepted
-        self.settings = ClerkSettings.require_from_environment(CLERK_ENVIRONMENT)
+class FakeCamera:
+    def __init__(self):
+        self.source = "http://192.168.100.88:8080/video"
+        self.enabled = False
+        self.rotation = 0
+        self.calibrated = False
 
-    def verify(self, session: str) -> dict:
-        if session != self.accepted:
-            raise ValidationError("the stub verifier rejected the session cookie")
-        return {"sub": "user_stub"}
+    def configure(self, *, source, enabled, orientation=None, rotation=None):
+        self.source = source
+        self.enabled = enabled
+        if rotation is not None:
+            self.rotation = rotation
+        return self.status()
+
+    def status(self):
+        return {
+            "enabled": self.enabled,
+            "running": self.enabled,
+            "source": self.source,
+            "orientation": "white_bottom",
+            "rotation": self.rotation,
+            "model": "gpt-5.6-sol",
+            "error": None,
+            "capture_error": None,
+            "inference_error": None,
+            "resolved_source": self.source,
+            "status": "complete" if self.enabled else "idle",
+            "confidence": None,
+            "problems": [],
+            "rows": (
+                [
+                    "rnbqkbnr",
+                    "pppppppp",
+                    "........",
+                    "........",
+                    "........",
+                    "........",
+                    "PPPPPPPP",
+                    "RNBQKBNR",
+                ]
+                if self.enabled
+                else None
+            ),
+            "pieces": [],
+            "stable_observations": 2 if self.enabled else 0,
+            "last_move": None,
+            "fen": None,
+            "turn": None,
+            "frames": 1 if self.enabled else 0,
+            "requests": 1 if self.enabled else 0,
+            "paused": False,
+            "last_frame_at": None,
+            "frame_age_s": None,
+            "stale": not self.enabled,
+            "consecutive_errors": 0,
+            "calibrated": self.calibrated,
+            "calibration": None,
+        }
+
+    def calibrate(self, corners):
+        self.calibrated = True
+        return self.status()
+
+    def clear_calibration(self):
+        self.calibrated = False
+        return self.status()
+
+    def preview_jpeg(self):
+        return b"\xff\xd8fake\xff\xd9"
+
+    def raw_preview_jpeg(self):
+        return b"\xff\xd8raw\xff\xd9"
+
+    def probe(self, source):
+        self.source = source
+        return {
+            "ok": True,
+            "source": source,
+            "resolved_source": "snapshot:http://phone/shot.jpg",
+            "width": 1920,
+            "height": 1080,
+            "latency_ms": 42.0,
+        }
+
+
+class FakeGame:
+    def __init__(self):
+        self.started = None
+
+    def running(self):
+        return self.started is not None
+
+    def start(self, **kwargs):
+        self.started = kwargs
+        return self.status()
+
+    def stop(self):
+        self.started = None
+        return self.status()
+
+    def status(self):
+        return {
+            "status": {
+                "state": "waiting_camera" if self.started else "idle",
+                "mode": self.started["mode"] if self.started else "idle",
+            },
+            "logs": "",
+        }
+
+
+class FakeOAuth:
+    def __init__(self):
+        self.connected = False
+        self.started = []
+
+    def token(self, optional=True):
+        return "token" if self.connected else None
+
+    def status(self):
+        return {
+            "connected": self.connected,
+            "username": "test-user" if self.connected else None,
+            "scopes": ["board:play"] if self.connected else [],
+            "expires_at": None,
+        }
+
+    def begin(self, redirect_uri):
+        self.started.append(redirect_uri)
+        return "https://lichess.org/oauth?state=test"
+
+    def complete(self, *, code, state):
+        if code != "valid" or state != "test":
+            raise ValidationError("invalid oauth callback")
+        self.connected = True
+        return self.status()
+
+    def validate(self):
+        if not self.connected:
+            raise ValidationError("not connected")
+        return self.status()
+
+    def disconnect(self):
+        self.connected = False
+
+
+class StubVerifier:
+    def verify(self, token):
+        if token != "valid":
+            raise ValidationError("rejected")
+        return {"sub": "user"}
+
+
+class WebSecurityModeTests(unittest.TestCase):
+    def test_local_mode_requires_no_clerk(self):
+        self.assertIsNone(
+            web_clerk_settings(
+                "127.0.0.1", allow_network=False, require_clerk=False, clerk=None
+            )
+        )
+
+    def test_network_mode_requires_opt_in(self):
+        with self.assertRaisesRegex(ValidationError, "--allow-network"):
+            web_clerk_settings(
+                "0.0.0.0", allow_network=False, require_clerk=False, clerk=None
+            )
+
+    def test_explicit_clerk_requires_key(self):
+        with self.assertRaises(ConfigurationError):
+            web_clerk_settings(
+                "127.0.0.1", allow_network=False, require_clerk=True, clerk=None
+            )
+
+    def test_service_store_can_initialize_missing_state(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = json.loads((ROOT / "config.demo.json").read_text())
+            config = AppConfig.from_mapping(raw)
+            service = GantryService(
+                config,
+                root / "missing.json",
+                root / "pending.json",
+                root / "audit.jsonl",
+            )
+            if not service.store.path.exists():
+                service.store.initialize(BoardState.standard(), overwrite=True)
+            self.assertEqual(service.store.load().revision, 0)
 
 
 class WebAppTests(unittest.TestCase):
     def setUp(self):
         self.temporary = TemporaryDirectory()
         root = Path(self.temporary.name)
-        raw = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
-        raw["planner"]["kind"] = "direct"
-        raw["capture"] = {"enabled": False, "slots": []}
-        raw["safety"]["calibrated"] = True
-        raw["safety"]["preflight_commands"] = []
+        raw = json.loads((ROOT / "config.demo.json").read_text())
         self.config = AppConfig.from_mapping(raw)
-        state = BoardState.from_mapping(
-            {
-                "schema_version": 1,
-                "revision": 0,
-                "pieces": {"white_pawn_e": {"status": "board", "x": 4, "y": 1}},
-                "processed_events": [],
-            }
-        )
-        state_path = root / "state.json"
-        atomic_write_json(state_path, state.to_dict())
+        state = root / "state.json"
+        atomic_write_json(state, BoardState.standard().to_dict())
         service = GantryService(
-            self.config,
-            state_path,
-            root / "pending.json",
-            root / "audit.jsonl",
+            self.config, state, root / "pending.json", root / "audit.jsonl"
         )
         self.controller = GantryController(self.config, service, demo=True)
         RequestHandler.controller = self.controller
         self.server = GantryHTTPServer(("127.0.0.1", 0), RequestHandler)
-        self.server.operation_manager = OperationManager(
-            root,
-            self.controller,
-            (
-                OperationSpec(
-                    "web-test",
-                    "Web test",
-                    "Print one line.",
-                    "Checks",
-                    ("/usr/bin/env", "true"),
-                ),
-            ),
-        )
-        self.server.live_game_manager = LiveGameManager(root, self.config, demo=True)
-        self.server.reed_switch = SimulatedReedSwitch()
-        self.server.board_sensor = SyntheticBoardSensor(sample_hz=300, stable_samples=2)
-        self.server.vision_manager = VisionManager()
+        self.server.camera = FakeCamera()
+        self.server.game = FakeGame()
+        self.server.lichess_oauth = FakeOAuth()
+        self.server.clerk_verifier = None
+        self.server.dashboard_html = HTML
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_port}"
@@ -92,323 +246,320 @@ class WebAppTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=2)
         self.controller.disconnect()
-        self.server.board_sensor.close()
-        self.server.vision_manager.close()
         self.temporary.cleanup()
 
-    def request(self, path, payload=None):
-        data = None if payload is None else json.dumps(payload).encode("utf-8")
+    def request(self, path, payload=None, headers=None):
+        data = None if payload is None else json.dumps(payload).encode()
         request = urllib.request.Request(
             self.base + path,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **(headers or {})},
         )
         with urllib.request.urlopen(request, timeout=3) as response:
-            return response.status, json.loads(response.read())
+            content = response.read()
+            return response.status, json.loads(content) if content else None
 
-    def test_plan_and_execute_api_share_integrated_workflow(self) -> None:
-        move = {
-            "event_id": "web-1",
-            "position": "white_pawn_e",
-            "px": 4,
-            "py": 1,
-            "nx": 4,
-            "ny": 3,
-        }
-        _, plan = self.request("/api/plan", {"move": move})
-        self.assertIn("G1 X122 Y178 Z200", plan["gcode"])
-        _, board_before = self.request("/api/board")
-        self.assertEqual(board_before["board_state"]["revision"], 0)
+    def test_dashboard_contains_full_game_camera_and_recovery_controls(self):
+        with urllib.request.urlopen(self.base + "/") as response:
+            html = response.read().decode()
+        self.assertIn("Start full game", html)
+        self.assertIn("192.168.100.88:8080", html)
+        self.assertIn("OpenAI Sol", html)
+        self.assertIn("Rotate phone image", html)
+        self.assertIn("Pending transaction recovery", html)
+        self.assertIn("Calibrate 4 corners", html)
+        self.assertIn("Connect Lichess", html)
+        self.assertIn("Scan ports", html)
+        self.assertIn('id="phoneStream"', html)
+        self.assertIn('id="cameraCanvas"', html)
+        self.assertIn("browser:http://192.168.100.88:8080", html)
+        self.assertIn('id="readyCamera"', html)
+        self.assertIn("@media(max-width:680px)", html)
+        self.assertNotIn("MCP23017", html)
+        self.assertNotIn("ArUco", html)
 
-        _, connected = self.request("/api/connect", {})
-        self.assertTrue(connected["status"]["connected"])
-        self.request("/api/home", {"confirm_motion": True})
-        _, executed = self.request(
-            "/api/execute",
-            {"move": move, "confirm_motion": True},
+    def test_every_javascript_dom_reference_exists_in_dashboard(self):
+        ids = set(re.findall(r'id="([A-Za-z][A-Za-z0-9_-]*)"', HTML))
+        references = set(re.findall(r"\$\('([A-Za-z][A-Za-z0-9_-]*)'\)", HTML))
+        self.assertEqual(references - ids, set())
+
+    def test_embedded_dashboard_javascript_is_syntactically_valid(self):
+        scripts = re.findall(r"<script>(.*?)</script>", HTML, flags=re.DOTALL)
+        self.assertGreaterEqual(len(scripts), 2)
+        for script in scripts:
+            result = subprocess.run(
+                ["node", "--check", "-"],
+                input=script,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_dashboard_wires_all_critical_action_routes(self):
+        for route in (
+            "/api/camera/configure",
+            "/api/camera/probe",
+            "/api/camera/browser-frame",
+            "/api/camera/calibrate",
+            "/api/camera/calibration/clear",
+            "/api/controller/connect",
+            "/api/controller/disconnect",
+            "/api/controller/home",
+            "/api/controller/stop",
+            "/api/game/start",
+            "/api/game/stop",
+            "/api/reconcile/apply",
+            "/api/reconcile/discard",
+            "/api/lichess/oauth/start",
+            "/api/lichess/disconnect",
+            "/api/setup/diagnostics",
+            "/api/setup/endstops",
+            "/api/setup/home",
+            "/api/setup/movement",
+            "/api/setup/magnet",
+            "/api/setup/centers",
+            "/api/setup/combined",
+        ):
+            self.assertIn(route, HTML)
+
+    def test_dashboard_contains_all_setup_steps_and_confirmation(self):
+        for text in (
+            "1. Diagnostics",
+            "2. Endstops",
+            "3. Home",
+            "4. Move 5 mm",
+            "5. Pulse magnet",
+            "6. Visit centers",
+            "Run complete setup",
+            "SETUP AREA CLEAR",
+        ):
+            self.assertIn(text, HTML)
+
+    def test_setup_motion_endpoints_require_exact_confirmation(self):
+        for route in ("home", "movement", "magnet", "centers", "combined"):
+            request = urllib.request.Request(
+                self.base + f"/api/setup/{route}",
+                data=json.dumps({"confirmation": "wrong"}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(request)
+            self.assertEqual(raised.exception.code, 409)
+
+    def test_setup_diagnostics_and_endstops_update_controller_status(self):
+        self.request("/api/controller/connect", {})
+        _, diagnostics = self.request("/api/setup/diagnostics", {})
+        self.assertTrue(diagnostics["result"]["setup"]["diagnostics"])
+        _, endstops = self.request("/api/setup/endstops", {})
+        self.assertTrue(endstops["result"]["setup"]["endstops"])
+
+    def test_complete_setup_endpoint_runs_every_demo_step(self):
+        self.request("/api/controller/connect", {})
+        _, data = self.request(
+            "/api/setup/combined", {"confirmation": "SETUP AREA CLEAR"}
         )
-        self.assertEqual(executed["summary"]["next_revision"], 1)
-        _, board_after = self.request("/api/board")
-        self.assertEqual(board_after["board_state"]["revision"], 1)
-        self.assertEqual(board_after["board_state"]["pieces"]["white_pawn_e"]["y"], 3)
+        for step in (
+            "diagnostics",
+            "endstops",
+            "homed",
+            "movement",
+            "magnet",
+            "centers",
+        ):
+            self.assertTrue(data["result"]["setup"][step])
 
-    def test_manual_api_homes_then_moves(self) -> None:
-        self.request("/api/connect", {})
-        _, home = self.request("/api/home", {"confirm_motion": True})
-        self.assertTrue(home["status"]["homed"])
-        _, moved = self.request(
-            "/api/move",
-            {"x_mm": 20, "y_mm": 30, "feed_mm_min": 600, "confirm_motion": True},
-        )
-        self.assertEqual(moved["status"]["position_mm"], {"x": 20.0, "y": 30.0})
+    def test_dashboard_includes_all_three_game_modes_and_prerequisite_gating(self):
+        for value in ("local", "lichess", "mirror"):
+            self.assertIn(f'value="{value}"', HTML)
+        self.assertIn("modeReady", HTML)
+        self.assertIn("stable_observations", HTML)
+        self.assertIn("cap.lichess", HTML)
+        self.assertIn("Boolean(p)", HTML)
 
-    def test_live_position_and_keyboard_jog_api(self) -> None:
-        self.request("/api/connect", {})
-        self.request("/api/home", {"confirm_motion": True})
-        _, position = self.request("/api/position", {})
-        self.assertEqual(
-            position["status"]["machine_position_mm"],
-            {"x": 2.0, "y": 298.0, "z": 328.0},
-        )
-        _, jogged = self.request(
-            "/api/jog",
+    def test_dashboard_displays_grid_and_machine_coordinates(self):
+        self.assertIn("piece.grid.x", HTML)
+        self.assertIn("piece.grid.y", HTML)
+        self.assertIn("piece.machine_mm.x", HTML)
+        self.assertIn("piece.machine_mm.y", HTML)
+
+    def test_dashboard_exposes_snapshot_freshness_and_reconnect_errors(self):
+        self.assertIn("last_frame_at", HTML)
+        self.assertIn("camera.stale", HTML)
+        self.assertIn("capture_error", HTML)
+        self.assertIn("inference_error", HTML)
+        self.assertIn("/api/camera/browser-frame", HTML)
+        self.assertIn("consecutive_errors", self.server.camera.status())
+        self.assertIn("data.controller.last_error", HTML)
+
+    def test_full_status_includes_camera_game_board_and_pending(self):
+        _, data = self.request("/api/full-status")
+        self.assertEqual(data["camera"]["model"], "gpt-5.6-sol")
+        self.assertEqual(data["game"]["status"]["state"], "idle")
+        self.assertEqual(data["board"]["revision"], 0)
+        self.assertIsNone(data["pending"])
+        self.assertIn("openai", data["capabilities"])
+        self.assertIn("lichess", data["capabilities"])
+        self.assertIn("ports", data)
+        self.assertTrue(all(value["likely_printer"] for value in data["ports"]))
+        self.assertFalse(data["lichess"]["connected"])
+
+    def test_camera_configuration_and_preview(self):
+        self.request(
+            "/api/camera/configure",
             {
-                "delta_x_mm": -5,
-                "delta_y_mm": 0,
-                "feed_mm_min": 600,
-                "confirm_motion": True,
+                "source": "snapshot:http://phone/shot.jpg",
+                "orientation": "white_bottom",
+                "rotation": 90,
+                "enabled": True,
             },
         )
-        self.assertEqual(jogged["status"]["position_mm"], {"x": 323.0, "y": 298.0})
-        self.assertEqual(
-            jogged["status"]["machine_position_mm"],
-            {"x": 2.0, "y": 298.0, "z": 323.0},
-        )
-
-    def test_operations_catalog_and_task_api(self) -> None:
-        _, catalog = self.request("/api/operations")
-        self.assertEqual(catalog["operations"][0]["id"], "web-test")
-        _, started = self.request(
-            "/api/tasks/start",
-            {"operation_id": "web-test", "confirmations": {}},
-        )
-        self.assertIn(started["run"]["state"], {"starting", "running", "completed"})
-        for _ in range(100):
-            _, status = self.request("/api/tasks/status")
-            if status["run"]["state"] == "completed":
-                break
-            threading.Event().wait(0.01)
-        self.assertEqual(status["run"]["state"], "completed")
-        self.assertEqual(status["run"]["returncode"], 0)
-
-    def test_dashboard_page_contains_operations_controls(self) -> None:
-        request = urllib.request.Request(self.base + "/")
-        with urllib.request.urlopen(request, timeout=3) as response:
-            html = response.read().decode("utf-8")
-        self.assertIn("Operations dashboard", html)
-        self.assertIn('id="taskStop"', html)
-        self.assertIn("/api/tasks/start", html)
-        self.assertIn('id="machineZ"', html)
-        self.assertIn("ArrowLeft", html)
-        self.assertIn("/api/jog", html)
-        self.assertIn('id="liveGameId"', html)
-        self.assertIn("/api/live/start", html)
-        self.assertIn("autoConnect", html)
-        self.assertLess(
-            html.index("async function autoConnect"), html.index("await autoConnect()")
-        )
-        self.assertIn('id="reedState"', html)
-        self.assertIn("/api/reed", html)
-        self.assertNotIn('id="keyboardArm"', html)
-        self.assertNotIn('id="liveBoardReset"', html)
-        self.assertNotIn('id="confirm"', html)
-        self.assertIn('id="sensorBoard"', html)
-        self.assertIn("/api/sensor/matrix", html)
-        self.assertIn('id="visionSource"', html)
-        self.assertIn('id="visionMoveDetail"', html)
-        self.assertIn('id="visionRetry"', html)
-        self.assertIn("/api/vision/status", html)
-        self.assertIn("Overhead exact-piece vision", html)
-
-    def test_reed_switch_api_reports_open_and_closed(self) -> None:
-        _, first = self.request("/api/reed", {})
-        _, second = self.request("/api/reed", {})
-        self.assertEqual(first["reed"]["pin"], "GPB0")
-        self.assertEqual(first["reed"]["state"], "open")
-        self.assertEqual(second["reed"]["state"], "closed")
-        self.assertEqual(second["reed"]["address"], "0x20")
-
-    def test_reed_switch_api_reports_i2c_failure_without_crashing(self) -> None:
-        class BrokenReader:
-            def read(self):
-                raise ValidationError("MCP23017 at 0x20 did not respond")
-
-        self.server.reed_switch = BrokenReader()
-        request = urllib.request.Request(
-            self.base + "/api/reed",
-            data=b"{}",
-            headers={"Content-Type": "application/json"},
-        )
-        with self.assertRaises(urllib.error.HTTPError) as raised:
-            urllib.request.urlopen(request, timeout=3)
-        self.assertEqual(raised.exception.code, 409)
-        payload = json.loads(raised.exception.read())
-        raised.exception.close()
-        self.assertIn("did not respond", payload["error"])
-
-    def test_synthetic_sensor_dataset_updates_piece_tracking(self) -> None:
-        _, initial = self.request("/api/sensor/status")
-        self.assertEqual(len(initial["sensor"]["matrix"]), 8)
-        _, started = self.request("/api/sensor/dataset", {"dataset": "e2e4"})
-        self.assertIn(started["sensor"]["state"], {"ready", "waiting", "move"})
-        for _ in range(100):
-            _, status = self.request("/api/sensor/status")
-            if status["sensor"]["last_move"] == "e2e4":
-                break
-            threading.Event().wait(0.01)
-        self.assertEqual(status["sensor"]["last_move"], "e2e4")
-        self.assertTrue(
-            any(piece["square"] == "e4" for piece in status["sensor"]["pieces"])
-        )
-
-    def test_synthetic_sensor_rejects_invalid_matrix(self) -> None:
-        request = urllib.request.Request(
-            self.base + "/api/sensor/matrix",
-            data=json.dumps({"matrix": [[0]]}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-        )
-        with self.assertRaises(urllib.error.HTTPError) as raised:
-            urllib.request.urlopen(request, timeout=3)
-        self.assertEqual(raised.exception.code, 409)
-        raised.exception.close()
-
-    def test_vision_demo_source_detects_exact_pieces_and_serves_preview(self) -> None:
-        _, configured = self.request(
-            "/api/vision/configure", {"source": "demo:e2e4", "enabled": True}
-        )
-        self.assertTrue(configured["vision"]["enabled"])
-        for _ in range(150):
-            _, status = self.request("/api/vision/status")
-            if status["vision"]["last_move"] == "e2e4":
-                break
-            threading.Event().wait(0.02)
-        self.assertEqual(status["vision"]["last_move"], "e2e4")
-        self.assertEqual(status["vision"]["observed_piece_count"], 32)
-        with urllib.request.urlopen(
-            self.base + "/api/vision/frame", timeout=3
-        ) as response:
+        _, data = self.request("/api/camera/status")
+        self.assertTrue(data["camera"]["running"])
+        self.assertEqual(data["camera"]["rotation"], 90)
+        with urllib.request.urlopen(self.base + "/api/camera/frame") as response:
             self.assertEqual(response.headers["Content-Type"], "image/jpeg")
             self.assertTrue(response.read().startswith(b"\xff\xd8"))
 
-    def test_vision_preview_without_a_frame_is_a_controlled_conflict(self) -> None:
-        request = urllib.request.Request(self.base + "/api/vision/frame")
-        with self.assertRaises(urllib.error.HTTPError) as raised:
-            urllib.request.urlopen(request, timeout=3)
-        self.assertEqual(raised.exception.code, 409)
-        payload = json.loads(raised.exception.read())
-        raised.exception.close()
-        self.assertIn("no camera preview", payload["error"])
+    def test_camera_probe_and_raw_preview_do_not_require_sol(self):
+        _, data = self.request(
+            "/api/camera/probe", {"source": "auto:http://phone:8080"}
+        )
+        self.assertEqual(data["result"]["width"], 1920)
+        self.assertEqual(data["result"]["height"], 1080)
+        with urllib.request.urlopen(self.base + "/api/camera/raw-frame") as response:
+            self.assertEqual(response.headers["Content-Type"], "image/jpeg")
+            self.assertEqual(response.read(), b"\xff\xd8raw\xff\xd9")
 
-    def test_vision_fusion_and_lichess_configuration_validation(self) -> None:
-        _, fused = self.request("/api/vision/fusion", {"enabled": True})
-        self.assertTrue(fused["vision"]["fusion_enabled"])
+    def test_browser_frame_upload_reaches_camera_manager(self):
+        received = []
+
+        def ingest(payload):
+            received.append(payload)
+            return self.server.camera.status()
+
+        self.server.camera.ingest_browser_jpeg = ingest
         request = urllib.request.Request(
-            self.base + "/api/vision/lichess",
-            data=json.dumps({"game_id": "bad!", "write": True}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            self.base + "/api/camera/browser-frame",
+            data=b"jpeg-payload",
+            headers={"Content-Type": "image/jpeg"},
         )
-        with self.assertRaises(urllib.error.HTTPError) as raised:
-            urllib.request.urlopen(request, timeout=3)
-        self.assertEqual(raised.exception.code, 409)
-        raised.exception.close()
+        with urllib.request.urlopen(request) as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(received, [b"jpeg-payload"])
 
-    def test_live_game_status_and_start_validation_api(self) -> None:
-        _, status = self.request("/api/live/status")
-        self.assertEqual(status["status"]["state"], "idle")
-        request = urllib.request.Request(
-            self.base + "/api/live/start",
-            data=json.dumps(
-                {"game_id": "game1234", "confirm_standard_position": False}
-            ).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-        )
-        with self.assertRaises(urllib.error.HTTPError) as raised:
-            urllib.request.urlopen(request, timeout=3)
-        self.assertEqual(raised.exception.code, 409)
-        missing = json.loads(raised.exception.read())
-        raised.exception.close()
-        self.assertIn("standard", missing["error"])
+    def test_camera_calibration_and_clear_endpoints(self):
+        corners = [
+            {"x": 0.1, "y": 0.1},
+            {"x": 0.9, "y": 0.1},
+            {"x": 0.9, "y": 0.9},
+            {"x": 0.1, "y": 0.9},
+        ]
+        _, data = self.request("/api/camera/calibrate", {"corners": corners})
+        self.assertTrue(data["result"]["calibrated"])
+        _, data = self.request("/api/camera/calibration/clear", {})
+        self.assertFalse(data["result"]["calibrated"])
 
-    def _enable_clerk(self, token: str) -> None:
-        verifier = StubClerkVerifier(token)
-        self.server.clerk_verifier = verifier
-        self.server.dashboard_html = render_dashboard(HTML, verifier.settings)
-
-    def test_clerk_mode_serves_a_public_shell_and_guards_the_apis(self) -> None:
-        self._enable_clerk("valid-clerk-session-token")
-        with urllib.request.urlopen(self.base + "/", timeout=3) as response:
-            html = response.read().decode("utf-8")
-        self.assertIn("clerkSignIn", html)
-        self.assertIn("clerk.browser.js", html)
-        self.assertIn("Operations dashboard", html)
-
-        with self.assertRaises(urllib.error.HTTPError) as anonymous:
-            urllib.request.urlopen(self.base + "/api/status", timeout=3)
-        self.assertEqual(anonymous.exception.code, 401)
-        self.assertIn(b"Clerk", anonymous.exception.read())
-        anonymous.exception.close()
-
-        rejected = urllib.request.Request(
-            self.base + "/api/status", headers={"Cookie": "__session=wrong"}
-        )
-        with self.assertRaises(urllib.error.HTTPError) as invalid:
-            urllib.request.urlopen(rejected, timeout=3)
-        self.assertEqual(invalid.exception.code, 401)
-        invalid.exception.close()
-
-        accepted = urllib.request.Request(
-            self.base + "/api/status",
-            headers={"Cookie": "__session=valid-clerk-session-token"},
-        )
-        with urllib.request.urlopen(accepted, timeout=3) as response:
-            self.assertTrue(json.loads(response.read())["ok"])
-
-    def test_a_bearer_header_is_no_longer_an_authentication_path(self) -> None:
-        self._enable_clerk("valid-clerk-session-token")
-        request = urllib.request.Request(
-            self.base + "/api/status",
-            headers={"Authorization": "Bearer valid-clerk-session-token"},
-        )
-        with self.assertRaises(urllib.error.HTTPError) as bearer:
-            urllib.request.urlopen(request, timeout=3)
-        self.assertEqual(bearer.exception.code, 401)
-        bearer.exception.close()
-
-    def test_the_session_cookie_guards_writes(self) -> None:
-        self._enable_clerk("valid-clerk-session-token")
-        anonymous_write = urllib.request.Request(
-            self.base + "/api/disconnect",
-            data=b"{}",
-            headers={"Content-Type": "application/json"},
-        )
-        with self.assertRaises(urllib.error.HTTPError) as blocked:
-            urllib.request.urlopen(anonymous_write, timeout=3)
-        self.assertEqual(blocked.exception.code, 401)
-        blocked.exception.close()
-
-        signed_write = urllib.request.Request(
-            self.base + "/api/disconnect",
-            data=b"{}",
-            headers={
-                "Content-Type": "application/json",
-                "Cookie": "__session=valid-clerk-session-token",
+    def test_game_start_disconnects_manual_controller_and_routes_settings(self):
+        self.request("/api/controller/connect", {})
+        self.request(
+            "/api/game/start",
+            {
+                "mode": "lichess",
+                "game_id": "game1234",
+                "local_color": "white",
+                "confirm_motion": True,
+                "serial_port": "DEMO",
+                "serial_baudrate": "250000",
             },
         )
-        with urllib.request.urlopen(signed_write, timeout=3) as response:
-            self.assertTrue(json.loads(response.read())["ok"])
+        self.assertFalse(self.controller.connected)
+        self.assertEqual(self.server.game.started["mode"], "lichess")
+        self.assertEqual(self.server.game.started["serial_port"], "DEMO")
+        self.assertEqual(self.server.game.started["serial_baudrate"], 250000)
 
-    def test_cross_site_writes_are_refused_even_with_the_cookie(self) -> None:
-        self._enable_clerk("valid-clerk-session-token")
-        forged = urllib.request.Request(
-            self.base + "/api/home",
-            data=b'{"confirm_motion": true}',
+    def test_controller_connect_accepts_selected_port_and_baud(self):
+        _, data = self.request(
+            "/api/controller/connect", {"port": "DEMO", "baudrate": "250000"}
+        )
+        self.assertTrue(data["result"]["connected"])
+        self.assertEqual(data["result"]["baudrate"], 250000)
+
+    def test_lichess_oauth_start_returns_official_authorization_url(self):
+        _, data = self.request("/api/lichess/oauth/start", {})
+        self.assertTrue(data["result"]["url"].startswith("https://lichess.org/oauth"))
+        self.assertEqual(
+            self.server.lichess_oauth.started,
+            [f"http://127.0.0.1:{self.server.server_port}/auth/lichess/callback"],
+        )
+
+    def test_lichess_oauth_callback_connects_and_redirects(self):
+        request = urllib.request.Request(
+            self.base + "/auth/lichess/callback?code=valid&state=test"
+        )
+        opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
+        with opener.open(request) as response:
+            self.assertEqual(response.geturl(), self.base + "/")
+        self.assertTrue(self.server.lichess_oauth.connected)
+
+    def test_lichess_disconnect_forgets_session_token(self):
+        self.server.lichess_oauth.connected = True
+        _, data = self.request("/api/lichess/disconnect", {})
+        self.assertFalse(data["result"]["connected"])
+
+    def test_cross_site_post_is_rejected_without_clerk(self):
+        request = urllib.request.Request(
+            self.base + "/api/controller/connect",
+            data=b"{}",
             headers={
                 "Content-Type": "application/json",
-                "Cookie": "__session=valid-clerk-session-token",
                 "Sec-Fetch-Site": "cross-site",
             },
         )
-        with self.assertRaises(urllib.error.HTTPError) as blocked:
-            urllib.request.urlopen(forged, timeout=3)
-        self.assertEqual(blocked.exception.code, 401)
-        blocked.exception.close()
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request)
+        self.assertEqual(raised.exception.code, 401)
 
-    def test_the_dashboard_shell_stays_public_so_sign_in_can_load(self) -> None:
-        self._enable_clerk("valid-clerk-session-token")
-        for path in ("/", "/?redirect=1"):
-            with urllib.request.urlopen(self.base + path, timeout=3) as response:
-                self.assertEqual(response.status, 200)
-                self.assertIn("clerkSignIn", response.read().decode("utf-8"))
+    def test_recovery_endpoint_requires_exact_confirmation(self):
+        request = urllib.request.Request(
+            self.base + "/api/reconcile/discard",
+            data=json.dumps({"confirmation": "wrong"}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request)
+        self.assertEqual(raised.exception.code, 409)
+
+    def test_unknown_get_and_post_routes_return_404(self):
+        for method in (None, b"{}"):
+            request = urllib.request.Request(
+                self.base + "/api/does-not-exist",
+                data=method,
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(request)
+            self.assertEqual(raised.exception.code, 404)
+
+    def test_camera_frame_before_capture_is_controlled_conflict(self):
+        self.server.camera.preview_jpeg = lambda: (_ for _ in ()).throw(
+            ValidationError("no camera frame")
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(self.base + "/api/camera/frame")
+        self.assertEqual(raised.exception.code, 409)
+
+    def test_clerk_mode_guards_api(self):
+        self.server.clerk_verifier = StubVerifier()
+        settings = ClerkSettings.require_from_environment(CLERK_ENVIRONMENT)
+        self.server.dashboard_html = render_dashboard(HTML, settings)
+        request = urllib.request.Request(self.base + "/api/full-status")
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request)
+        self.assertEqual(raised.exception.code, 401)
+        request.add_header("Cookie", "__session=valid")
+        with urllib.request.urlopen(request) as response:
+            self.assertEqual(response.status, 200)
 
 
 if __name__ == "__main__":

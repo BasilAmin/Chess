@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import re
 import threading
 from time import monotonic, sleep
@@ -196,7 +197,46 @@ class MarlinSerial:
         if not self.settings.auto_detect:
             return (self.settings.port,)
         ports = discover_serial_ports(self._port_provider)
-        return tuple(item.device for item in ports)
+        likely = tuple(item.device for item in ports if item.likely_printer)
+        return likely or tuple(item.device for item in ports)
+
+    def _open_connection(
+        self, factory: Callable[..., Any], device: str, baudrate: int
+    ) -> Any:
+        options = {
+            "baudrate": baudrate,
+            "timeout": self.settings.read_timeout_s,
+            "write_timeout": self.settings.write_timeout_s,
+            "rtscts": False,
+            "dsrdtr": False,
+        }
+        if self._serial_factory is not None:
+            return factory(port=device, **options)
+        serial_object = factory(port=None, **options)
+        try:
+            serial_object.dtr = False
+            serial_object.rts = False
+            serial_object.port = device
+            serial_object.open()
+            return serial_object
+        except Exception:
+            self._close_object(serial_object)
+            raise
+
+    def _wait_for_device(self, device: str, timeout_s: float) -> Optional[str]:
+        if self._serial_factory is not None:
+            return device
+        deadline = monotonic() + timeout_s
+        original = Path(device)
+        while monotonic() < deadline:
+            if original.exists():
+                return str(original)
+            ports = discover_serial_ports(self._port_provider)
+            likely = [item.device for item in ports if item.likely_printer]
+            if len(likely) == 1:
+                return likely[0]
+            sleep(0.2)
+        return None
 
     @staticmethod
     def _close_object(serial_object: Any) -> None:
@@ -309,13 +349,15 @@ class MarlinSerial:
                 for baudrate in self.settings.candidate_baudrates:
                     serial_object = None
                     try:
-                        serial_object = factory(
-                            port=device,
-                            baudrate=baudrate,
-                            timeout=self.settings.read_timeout_s,
-                            write_timeout=self.settings.write_timeout_s,
-                            rtscts=False,
-                            dsrdtr=False,
+                        active_device = self._wait_for_device(
+                            device, self.settings.startup_wait_s + 3.0
+                        )
+                        if active_device is None:
+                            raise SerialProtocolError(
+                                f"{device} disappeared and did not re-enumerate; check USB cable and controller power"
+                            )
+                        serial_object = self._open_connection(
+                            factory, active_device, baudrate
                         )
                         if self.settings.startup_wait_s:
                             sleep(self.settings.startup_wait_s)
@@ -348,7 +390,7 @@ class MarlinSerial:
 
                         self._serial = serial_object
                         self._connection_info = ConnectionInfo(
-                            port=device,
+                            port=active_device,
                             baudrate=baudrate,
                             firmware=firmware,
                         )
@@ -362,8 +404,8 @@ class MarlinSerial:
             self._connection_info = None
             detail = "; ".join(errors[-6:])
             hint = (
-                " Check serial permissions (often the dialout group), close Cura/Pronterface, "
-                "and verify that the board is running Marlin."
+                " Check USB power/cable if the device vanishes, close Cura/Pronterface and other "
+                "dashboard instances, verify dialout access, and confirm Marlin baud/firmware."
             )
             raise SerialProtocolError(
                 "serial ports were found, but none completed the Marlin handshake. "
