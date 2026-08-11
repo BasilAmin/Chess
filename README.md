@@ -161,7 +161,8 @@ chmod 600 .env.local
 
 Only `OPENAI_API_KEY`, `LICHESS_TOKEN`, `CLERK_PUBLISHABLE_KEY`, and
 `CHESS_GANTRY_CAMERA_SOURCE` are accepted from this file. Group/world-readable
-permissions are rejected. Existing exported variables take precedence.
+permissions are rejected. The secure project file overrides stale inherited
+values so a previously exported API key cannot silently remain active.
 
 Use **Connect Lichess** in the dashboard for game modes. It opens Lichess's
 official OAuth Authorization Code flow with PKCE and requests only `board:play`.

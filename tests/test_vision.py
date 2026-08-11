@@ -93,6 +93,33 @@ class VisionTests(unittest.TestCase):
                 }
             )
 
+    def test_partial_schema_allows_tentative_symbols_without_accepting_move(
+        self,
+    ) -> None:
+        rows = board_rows(chess.Board())
+        value = BoardTranscription.model_validate(
+            {
+                "status": "partial",
+                "confidence": {
+                    "board_detection": "high",
+                    "grid_mapping": "medium",
+                    "piece_recognition": "low",
+                },
+                "rows": {f"row_{index + 1}": row for index, row in enumerate(rows)},
+                "problems": ["ambiguous_pieces"],
+            }
+        )
+        self.assertEqual(value.status, "partial")
+        moves = []
+        manager = SolVisionManager(transcriber=object(), move_handler=moves.append)
+        try:
+            manager.start_game()
+            manager._accept(value)
+            manager._accept(value)
+            self.assertEqual(moves, [])
+        finally:
+            manager.close()
+
     def test_orientation_maps_image_rows_to_algebraic_squares(self) -> None:
         rows = board_rows(chess.Board())
         white = image_rows_to_board(rows, "white_bottom")

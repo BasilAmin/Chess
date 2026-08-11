@@ -33,14 +33,17 @@ class EnvironmentTests(unittest.TestCase):
             )
             self.assertEqual(loaded, target)
 
-    def test_existing_environment_wins(self):
+    def test_secure_project_file_overrides_stale_inherited_environment(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / ".env.local"
             path.write_text("OPENAI_API_KEY=file-value\n")
             os.chmod(path, 0o600)
             target = {"OPENAI_API_KEY": "exported-value"}
-            self.assertEqual(load_local_environment(path, target), {})
-            self.assertEqual(target["OPENAI_API_KEY"], "exported-value")
+            self.assertEqual(
+                load_local_environment(path, target),
+                {"OPENAI_API_KEY": "file-value"},
+            )
+            self.assertEqual(target["OPENAI_API_KEY"], "file-value")
 
     def test_group_or_world_access_is_rejected(self):
         with TemporaryDirectory() as directory:

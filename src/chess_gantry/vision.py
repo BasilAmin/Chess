@@ -99,8 +99,6 @@ class BoardTranscription(StrictModel):
                 raise ValueError(
                     "complete transcription requires medium or high confidence"
                 )
-        elif self.status == "partial" and not unresolved:
-            raise ValueError("partial transcription must contain x or ?")
         elif self.status in {"not_found", "unusable"} and encoded != "?" * 64:
             raise ValueError("not_found and unusable must mark all cells unknown")
         return self

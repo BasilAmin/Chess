@@ -46,7 +46,6 @@ def load_local_environment(
             value = value[1:-1]
         if not value:
             raise ConfigurationError(f"{path}:{number} has an empty value for {key}")
-        if key not in target:
-            target[key] = value
-            loaded[key] = value
+        target[key] = value
+        loaded[key] = value
     return loaded
