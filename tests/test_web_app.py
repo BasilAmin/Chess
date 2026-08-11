@@ -23,6 +23,7 @@ from chess_gantry.web_app import (
     GantryHTTPServer,
     RequestHandler,
     web_clerk_settings,
+    web_bind_error,
 )
 
 
@@ -183,6 +184,11 @@ class StubVerifier:
 
 
 class WebSecurityModeTests(unittest.TestCase):
+    def test_address_in_use_error_is_actionable(self):
+        error = web_bind_error("127.0.0.1", 8000, OSError(98, "in use"))
+        self.assertIn("already in use", str(error))
+        self.assertIn("--web-port 8001", str(error))
+
     def test_local_mode_requires_no_clerk(self):
         self.assertIsNone(
             web_clerk_settings(
