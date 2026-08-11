@@ -102,11 +102,14 @@ def _web_command(base: list) -> list:
     command = base + ["web", "--host", host, "--web-port", port, "--no-browser"]
     if _truthy("CHESS_GANTRY_DEMO"):
         command.append("--demo")
-    if not os.environ.get("CLERK_PUBLISHABLE_KEY", "").strip():
-        _log("CLERK_PUBLISHABLE_KEY is not set; the dashboard will refuse to start")
+    if os.environ.get("CLERK_PUBLISHABLE_KEY", "").strip():
+        command.append("--require-clerk")
+    elif host not in LOOPBACK_HOSTS:
+        command.append("--allow-network")
+        _log("WARNING: Clerk is unset; every reachable user can control the gantry")
     _log("web dashboard listening on http://" + host + ":" + port)
     if host not in LOOPBACK_HOSTS:
-        _log("the dashboard is exposed on every interface and needs a Clerk sign-in")
+        _log("the dashboard is exposed on a network-visible address")
     return command
 
 

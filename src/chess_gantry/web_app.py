@@ -45,6 +45,14 @@ def _lan_address() -> str:
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
+VISION_PREVIEW_HTML = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Chess Gantry Vision</title><style>
+:root{color-scheme:dark;font-family:Inter,system-ui,sans-serif}body{margin:0;background:#080b11;color:#eef3ff;padding:18px}main{max-width:1100px;margin:auto}h1{margin:0 0 8px}p{color:#9eabc2}img{display:block;width:100%;max-height:68vh;object-fit:contain;background:#000;border:1px solid #30394a;border-radius:14px}pre{white-space:pre-wrap;background:#151a24;border:1px solid #30394a;border-radius:12px;padding:14px;max-height:20vh;overflow:auto}
+</style></head><body><main><h1>Overhead recognition</h1><p>Pink = pawn · Blue = rook · Green = knight</p><img id="frame" alt="Annotated camera frame"><pre id="status">Waiting for the camera…</pre></main><script>
+async function refresh(){try{const response=await fetch('/api/vision/status');const data=(await response.json()).vision;document.getElementById('frame').src='/api/vision/frame?t='+Date.now();document.getElementById('status').textContent=JSON.stringify({state:data.color_state,error:data.color_error,pieces:data.color_pieces,lastMovement:data.color_last_change},null,2)}catch(error){document.getElementById('status').textContent='ERROR: '+error.message}}refresh();setInterval(refresh,500);
+</script></body></html>"""
+
+
 HTML = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -56,7 +64,7 @@ HTML = r"""<!doctype html>
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,#16213b,transparent 32rem),var(--bg);color:var(--text)}main{width:min(1120px,calc(100% - 30px));margin:auto;padding:34px 0 60px}header{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:22px}h1{margin:0;font-size:clamp(2rem,5vw,3.2rem);letter-spacing:-.045em}h2{font-size:1.05rem;margin:0 0 16px}p{color:var(--muted);line-height:1.55}.subtitle{max-width:720px;margin:8px 0 0}.pill{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:9px 12px;white-space:nowrap;color:var(--muted)}.pill.good{color:var(--accent)}.pill.bad{color:var(--danger)}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{border:1px solid var(--line);border-radius:17px;padding:20px;background:rgba(21,26,36,.96);box-shadow:0 20px 55px rgba(0,0,0,.18)}.wide{grid-column:1/-1}.fields{display:grid;grid-template-columns:1fr 1fr;gap:11px}.three{grid-template-columns:1fr 1fr 1fr}label{display:block;font-size:.8rem;color:var(--muted);margin-bottom:6px}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:10px;background:var(--card2);color:var(--text);padding:11px 12px;font:inherit;outline:none}textarea{min-height:190px;resize:vertical;font:13px/1.5 ui-monospace,monospace}input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(103,232,181,.12)}.actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:14px}button{border:1px solid var(--line);border-radius:10px;background:var(--card2);color:var(--text);padding:10px 14px;font-weight:700;cursor:pointer}button:hover:not(:disabled){border-color:#64718f;transform:translateY(-1px)}button:disabled{opacity:.38;cursor:not-allowed}.primary{background:var(--accent);border-color:var(--accent);color:#07130f}.danger{background:#421b24;border-color:#7d3040;color:#ffdce2}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}.metric{border:1px solid var(--line);background:var(--card2);border-radius:11px;padding:12px}.metric span{display:block;color:var(--muted);font-size:.74rem;margin-bottom:4px}.metric strong{font-size:1.05rem}.notice{border-left:3px solid var(--warn);background:#292318;color:#f2dba9;padding:10px 12px;margin-top:14px;font-size:.84rem;line-height:1.45}.safe{border-left-color:var(--accent);background:#162a24;color:#c9f7e4}pre{margin:0;min-height:130px;max-height:310px;overflow:auto;border:1px solid var(--line);border-radius:11px;background:#080b10;padding:12px;color:#bcc7dc;white-space:pre-wrap;font:12px/1.55 ui-monospace,monospace}.split{display:grid;grid-template-columns:1fr 1fr;gap:12px}.small{font-size:.8rem;color:var(--muted)}.check{display:flex;gap:8px;align-items:center;margin-top:12px;color:var(--muted);font-size:.85rem}.check input{width:auto}.locked{color:var(--danger)}
 @media(max-width:780px){header{display:block}.pill{display:inline-block;margin-top:14px}.grid,.split{grid-template-columns:1fr}.wide{grid-column:auto}.three{grid-template-columns:1fr}.metrics{grid-template-columns:1fr 1fr}}
 .ops{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.op-category{grid-column:1/-1;margin:15px 0 1px;padding-top:12px;border-top:1px solid var(--line);font-size:.82rem;text-transform:uppercase;letter-spacing:.12em;color:var(--muted)}.op-category:first-child{margin-top:0;border-top:0;padding-top:0}.op{border:1px solid var(--line);border-radius:13px;padding:14px;background:var(--card2)}.op h3{margin:0 0 7px;font-size:.95rem}.op p{font-size:.8rem;margin:0;min-height:42px}.op .tag{display:inline-block;font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);margin-bottom:8px}.op.physical{border-color:#664c28}.op.physical .tag{color:var(--warn)}.taskbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.tasklog{height:280px}.position-box{border:1px solid #426858;background:#101d1a;border-radius:14px;padding:15px;margin-top:14px}.position-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.position-value{font:700 1.35rem/1.1 ui-monospace,monospace;color:var(--accent)}.jog-layout{display:grid;grid-template-columns:180px 1fr;gap:18px;align-items:center}.jog-pad{display:grid;grid-template-columns:repeat(3,52px);grid-template-rows:repeat(3,52px);gap:6px;justify-content:center}.jog-pad button{font-size:1.35rem;padding:0}.jog-up{grid-column:2}.jog-left{grid-column:1;grid-row:2}.jog-home{grid-column:2;grid-row:2}.jog-right{grid-column:3;grid-row:2}.jog-down{grid-column:2;grid-row:3}.live-game{border-color:#5f4d90;background:linear-gradient(135deg,rgba(68,45,112,.45),rgba(21,26,36,.96))}.live-status{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin:12px 0}.live-status>div{padding:10px;border:1px solid var(--line);border-radius:10px;background:rgba(0,0,0,.18)}.reed-state{font:800 2rem/1 ui-monospace,monospace;color:var(--muted);margin:10px 0}.reed-state.closed{color:var(--accent)}.reed-state.error{color:var(--danger)}.sensor-card{border-color:#356985;background:linear-gradient(135deg,rgba(24,69,92,.42),rgba(21,26,36,.98))}.sensor-layout{display:grid;grid-template-columns:minmax(300px,480px) 1fr;gap:20px}.sensor-board{display:grid;grid-template-columns:repeat(8,1fr);aspect-ratio:1;max-width:480px;border:2px solid #7797a8}.sensor-cell{border:0;border-radius:0;padding:0;min-width:0;font:700 clamp(.76rem,2.2vw,1.25rem)/1 ui-monospace,monospace;position:relative}.sensor-cell.light{background:#b9cad1;color:#102027}.sensor-cell.dark{background:#547285;color:#f2fbff}.sensor-cell.occupied::after{content:'';position:absolute;inset:16%;border-radius:50%;border:3px solid currentColor}.sensor-cell.changed{box-shadow:inset 0 0 0 4px var(--warn)}.sensor-rank{position:absolute;left:3px;top:3px;font-size:.55rem}.sensor-file{position:absolute;right:3px;bottom:3px;font-size:.55rem}.sensor-status{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px}.sensor-status>div{padding:9px;border:1px solid var(--line);border-radius:9px;background:rgba(0,0,0,.16)}.sensor-events{height:190px}.piece-list{max-height:190px;overflow:auto;display:grid;grid-template-columns:repeat(2,1fr);gap:4px;font:12px ui-monospace,monospace}.write-row{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end}.switch{display:flex;align-items:center;gap:8px;color:var(--text);margin:0}.switch input{width:auto}@media(max-width:900px){.ops{grid-template-columns:1fr 1fr}.sensor-layout{grid-template-columns:1fr}}@media(max-width:700px){.jog-layout{grid-template-columns:1fr}.position-grid{grid-template-columns:1fr 1fr}}@media(max-width:600px){.ops{grid-template-columns:1fr}.sensor-status{grid-template-columns:1fr 1fr}}
-.vision-card{border-color:#6b508d;background:linear-gradient(135deg,rgba(74,46,108,.48),rgba(21,26,36,.96))}.vision-preview{width:100%;aspect-ratio:16/9;object-fit:contain;border:1px solid var(--line);border-radius:12px;background:#080a0f}.vision-list{max-height:260px}.vision-error{color:var(--danger)}
+.vision-card{border-color:#6b508d;background:linear-gradient(135deg,rgba(74,46,108,.48),rgba(21,26,36,.96))}.vision-preview{width:100%;aspect-ratio:16/9;object-fit:contain;border:1px solid var(--line);border-radius:12px;background:#080a0f}.vision-list{max-height:260px}.vision-error{color:var(--danger)}.color-piece{border-left:5px solid var(--line)}.color-piece.pink{border-left-color:#ff70d4}.color-piece.blue{border-left-color:#328dff}.color-piece.green{border-left-color:#4fdb72}
 </style>
 </head>
 <body><main>
@@ -76,7 +84,7 @@ HTML = r"""<!doctype html>
 }</textarea><div class="actions"><button id="plan" class="primary">Plan only</button><button id="execute">Execute move</button></div><p id="lockState" class="small locked"></p></div><div><label>Plan / generated G-code</label><pre id="planout">No plan yet.</pre></div></div></div>
 <div class="card wide live-game"><div class="taskbar"><div><h2>5. Live Lichess TV game</h2><p class="small">Enter a new public game ID before White's first move. The server creates fresh standard state, homes once, and streams every new Lichess move to this computer's serial port.</p></div><button id="liveStop" class="danger" disabled>Stop live game</button></div><div class="fields"><div><label for="liveGameId">Lichess game ID</label><input id="liveGameId" maxlength="12" placeholder="6RkOwfp1"></div><div><label>Session</label><p class="small">Starting live play assumes the physical board is in the standard position.</p></div></div><div class="actions"><button id="liveStart" class="primary">Start immediate live play</button></div><div class="live-status"><div><span class="small">State</span><strong id="liveState">Idle</strong></div><div><span class="small">Executed</span><strong id="liveCount">0</strong></div><div><span class="small">Last event</span><strong id="liveLast">—</strong></div></div><pre id="liveLog">No live game started in this server session.</pre><p class="small">Nearest-home square is h1 on White's side. Start is rejected if the Lichess game already contains moves. Captures stop the follower while physical capture storage is disabled.</p></div>
 <div class="card wide sensor-card"><div class="taskbar"><div><h2>6. Synthetic 8 x 8 sensor lab</h2><p class="small">Server-side occupancy sampling runs at 300 Hz. Click cells or load a dataset to imitate hand-moved pieces. Legal moves update tracked piece identities and can optionally be submitted to Lichess.</p></div><button id="sensorReset">Reset standard board</button></div><div class="sensor-layout"><div><div id="sensorBoard" class="sensor-board"></div><div class="actions"><select id="sensorDataset"></select><button id="sensorRunDataset" class="primary">Run dataset</button><button id="sensorRetry">Retry move write</button></div></div><div><div class="sensor-status"><div><span class="small">Detector</span><strong id="sensorState">ready</strong></div><div><span class="small">Turn</span><strong id="sensorTurn">white</strong></div><div><span class="small">Last move</span><strong id="sensorMove">—</strong></div><div><span class="small">Sampling</span><strong id="sensorRate">300 Hz</strong></div></div><div class="write-row"><div><label for="sensorGameId">Lichess Board API game ID</label><input id="sensorGameId" maxlength="12" placeholder="optional"></div><label class="switch"><input id="sensorWrite" type="checkbox"> Write inferred moves</label></div><div class="actions"><button id="sensorSaveWrite">Save Lichess settings</button><button id="sensorApplyMatrix">Apply matrix JSON</button></div><textarea id="sensorMatrixInput" spellcheck="false"></textarea><label>Tracked pieces</label><div id="sensorPieces" class="piece-list"></div><label>Sensor events</label><pre id="sensorEvents" class="sensor-events">No sensor events yet.</pre><p id="sensorError" class="small"></p></div></div></div>
-<div class="card wide vision-card"><div class="taskbar"><div><h2>7. Overhead exact-piece vision</h2><p class="small">Unique ArUco MIP tags identify every piece. Four fixed references register one top-down camera to the board. Stable legal positions are accepted; occlusion, ambiguity, illegal edits, and sensor disagreement are rejected.</p></div><button id="visionReset">Reset tracker</button></div><div class="sensor-layout"><div><img id="visionPreview" class="vision-preview" alt="Authenticated overhead camera preview"><p class="small">Keep all four board references and every piece cap visible. The preview endpoint requires Clerk authentication.</p><label>Last exact move transition</label><pre id="visionMoveDetail">No accepted vision move yet.</pre></div><div><div class="sensor-status"><div><span class="small">Detector</span><strong id="visionState">disabled</strong></div><div><span class="small">Turn</span><strong id="visionTurn">white</strong></div><div><span class="small">Last move</span><strong id="visionMove">—</strong></div><div><span class="small">Pieces</span><strong id="visionPiecesCount">0 / 32</strong></div></div><div class="fields"><div><label for="visionSource">Camera source</label><input id="visionSource" placeholder="demo, /dev/video0, stream URL, or snapshot:URL"></div><div><label for="visionGameId">Lichess Board API game ID</label><input id="visionGameId" maxlength="12" placeholder="optional"></div></div><div class="write-row"><label class="switch"><input id="visionFusion" type="checkbox"> Require occupancy agreement</label><label class="switch"><input id="visionWrite" type="checkbox"> Write moves to Lichess</label></div><div class="actions"><button id="visionStart" class="primary">Start vision</button><button id="visionStop">Stop vision</button><button id="visionSave">Save fusion and Lichess</button><button id="visionRetry">Retry failed write once</button></div><p id="visionError" class="small vision-error"></p><label>All configured pieces: expected versus observed square and x/y coordinate</label><div id="visionPieces" class="piece-list vision-list"></div><label>Vision events</label><pre id="visionEvents" class="sensor-events">No vision events yet.</pre></div></div></div>
+<div class="card wide vision-card"><div class="taskbar"><div><h2>7. Overhead board vision</h2><p class="small">Exact ArUco tags identify permanent pieces. Optional color caps classify pink as pawn, blue as rook, and green as knight. Four board references map detections to squares.</p></div><button id="visionReset">Reset tracker</button></div><div class="sensor-layout"><div><img id="visionPreview" class="vision-preview" alt="Annotated overhead camera preview"><p class="small">The live preview draws the calibrated board grid and labels every recognized color cap. Keep all four board references visible.</p><label>Last exact move transition</label><pre id="visionMoveDetail">No accepted exact-tag move yet.</pre><label>Last color movement</label><pre id="visionColorMove">No stable color movement yet.</pre></div><div><div class="sensor-status"><div><span class="small">Exact detector</span><strong id="visionState">disabled</strong></div><div><span class="small">Color detector</span><strong id="visionColorState">waiting</strong></div><div><span class="small">Last exact move</span><strong id="visionMove">—</strong></div><div><span class="small">Recognized colors</span><strong id="visionColorCount">0</strong></div></div><div class="fields"><div><label for="visionSource">Camera source</label><input id="visionSource" placeholder="demo-colors, /dev/video0, http://phone/video, snapshot:http://phone/shot.jpg"></div><div><label for="visionGameId">Lichess Board API game ID</label><input id="visionGameId" maxlength="12" placeholder="optional"></div></div><div class="write-row"><label class="switch"><input id="visionColors" type="checkbox" checked> Pink pawn · blue rook · green knight</label><label class="switch"><input id="visionFusion" type="checkbox"> Require occupancy agreement</label><label class="switch"><input id="visionWrite" type="checkbox"> Write exact moves to Lichess</label></div><div class="actions"><button id="visionStart" class="primary">Start camera</button><button id="visionPopout">Open camera window</button><button id="visionStop">Stop camera</button><button id="visionSave">Save fusion and Lichess</button><button id="visionRetry">Retry failed write once</button></div><p id="visionError" class="small vision-error"></p><label>Color-recognized pieces and squares</label><div id="visionColorPieces" class="piece-list vision-list"></div><label>Exact tagged pieces: expected versus observed</label><div id="visionPieces" class="piece-list vision-list"></div><label>Vision events</label><pre id="visionEvents" class="sensor-events">No vision events yet.</pre></div></div></div>
 <div class="card wide"><div class="taskbar"><div><h2>8. Operations dashboard</h2><p class="small">Allowlisted tests, simulations, hardware demos, state tools, and Lichess workflows. Only one task can run at a time.</p></div><button id="taskStop" class="danger" disabled>Stop task</button></div><div id="ops" class="ops"><p>Loading operations…</p></div></div>
 <div class="card wide"><div class="taskbar"><h2>Task output</h2><strong id="taskState" class="small">Idle</strong></div><pre id="tasklog" class="tasklog">No dashboard task has run.</pre></div>
 <div class="card"><h2>Board state</h2><div class="actions"><button id="boardRefresh">Refresh state</button></div><pre id="boardout">Loading…</pre></div>
@@ -122,9 +130,10 @@ $('sensorRunDataset').onclick=async()=>renderSensor((await api('/api/sensor/data
 $('sensorSaveWrite').onclick=async()=>renderSensor((await api('/api/sensor/lichess',{method:'POST',body:JSON.stringify({game_id:$('sensorGameId').value.trim(),write:$('sensorWrite').checked})})).sensor);
 $('sensorApplyMatrix').onclick=async()=>{try{await setSensorMatrix(JSON.parse($('sensorMatrixInput').value))}catch(error){$('sensorError').textContent=`Matrix JSON: ${error.message}`}};
 $('sensorRetry').onclick=async()=>renderSensor((await api('/api/sensor/retry',{method:'POST',body:'{}'})).sensor);
-function renderVision(data){visionData=data;$('visionState').textContent=data.running?data.state:(data.enabled?'connecting':'disabled');$('visionTurn').textContent=data.turn;$('visionMove').textContent=data.last_move||'—';$('visionPiecesCount').textContent=`${data.observed_piece_count} / ${data.expected_piece_count}`;$('visionError').textContent=data.source_error||data.error||`Reference error ${data.reference_error??'—'} · smallest tag ${data.smallest_marker_px??'—'} px · ${data.frame_hz_observed.toFixed(1)} fps · ${data.piece_disagreements} disagreement(s)`;$('visionSource').value=data.source||'';$('visionGameId').value=data.game_id||'';$('visionWrite').checked=data.write_lichess;$('visionFusion').checked=data.fusion_enabled;$('visionMoveDetail').textContent=data.last_move_detail?JSON.stringify(data.last_move_detail,null,2):'No accepted vision move yet.';$('visionPieces').innerHTML=data.piece_comparison.map(piece=>{const expected=piece.expected_square?`${piece.expected_square} (${piece.expected_coordinate.x},${piece.expected_coordinate.y})`:'off board';const observed=piece.observed_square?`${piece.observed_square} (${piece.observed_coordinate.x},${piece.observed_coordinate.y})`:'not seen';return `<span title="camera row ${piece.camera_cell?.row??'—'}, column ${piece.camera_cell?.column??'—'} · marker ${piece.marker_side_px??'—'} px">#${piece.marker_id} ${piece.color} ${piece.type} · ${piece.piece_id} · expected ${expected} · observed ${observed} · ${piece.state}</span>`}).join('');$('visionEvents').textContent=data.events.length?data.events.map(event=>`[${new Date(event.timestamp).toLocaleTimeString()}] ${event.kind.toUpperCase()} ${event.message}`).join('\n'):'No vision events yet.';if(data.frames>visionPreviewSequence&&data.running){visionPreviewSequence=data.frames;$('visionPreview').src=`/api/vision/frame?t=${Date.now()}`}}
+function renderVision(data){visionData=data;$('visionState').textContent=data.running?data.state:(data.enabled?'connecting':'disabled');$('visionColorState').textContent=data.color_state||'waiting';$('visionMove').textContent=data.last_move||'—';$('visionColorCount').textContent=data.color_piece_count??0;const exactError=data.color_enabled&&data.color_piece_count>0?null:data.error;$('visionError').textContent=data.source_error||data.color_error||exactError||`Color recognition active · ${data.frame_hz_observed.toFixed(1)} fps`;$('visionSource').value=data.source||'';$('visionGameId').value=data.game_id||'';$('visionWrite').checked=data.write_lichess;$('visionFusion').checked=data.fusion_enabled;$('visionColors').checked=data.color_enabled!==false;$('visionMoveDetail').textContent=data.last_move_detail?JSON.stringify(data.last_move_detail,null,2):'No accepted exact-tag move yet.';$('visionColorMove').textContent=data.color_last_change?JSON.stringify(data.color_last_change,null,2):'No stable color movement yet.';$('visionColorPieces').innerHTML=(data.color_pieces||[]).map(piece=>`<span class="color-piece ${piece.color}">${piece.square} · ${piece.color} ${piece.type} · board (${piece.coordinate.x},${piece.coordinate.y}) · image (${piece.image_center.x},${piece.image_center.y})</span>`).join('')||'<span>No pink, blue, or green caps recognized.</span>';$('visionPieces').innerHTML=(data.piece_comparison||[]).map(piece=>{const expected=piece.expected_square?`${piece.expected_square} (${piece.expected_coordinate.x},${piece.expected_coordinate.y})`:'off board';const observed=piece.observed_square?`${piece.observed_square} (${piece.observed_coordinate.x},${piece.observed_coordinate.y})`:'not seen';return `<span>#${piece.marker_id} ${piece.color} ${piece.type} · expected ${expected} · observed ${observed} · ${piece.state}</span>`}).join('');$('visionEvents').textContent=data.events.length?data.events.map(event=>`[${new Date(event.timestamp).toLocaleTimeString()}] ${event.kind.toUpperCase()} ${event.message}`).join('\n'):'No vision events yet.';if(data.frames>visionPreviewSequence&&data.running){visionPreviewSequence=data.frames;$('visionPreview').src=`/api/vision/frame?t=${Date.now()}`}}
 async function visionStatus(){try{renderVision((await api('/api/vision/status')).vision)}catch(error){$('visionError').textContent=error.message}}
-$('visionStart').onclick=async()=>renderVision((await api('/api/vision/configure',{method:'POST',body:JSON.stringify({source:$('visionSource').value.trim(),enabled:true})})).vision);
+$('visionStart').onclick=async()=>renderVision((await api('/api/vision/configure',{method:'POST',body:JSON.stringify({source:$('visionSource').value.trim(),enabled:true,color_enabled:$('visionColors').checked})})).vision);
+$('visionPopout').onclick=()=>window.open('/vision-preview','chessGantryVision','width=1050,height=820');
 $('visionStop').onclick=async()=>renderVision((await api('/api/vision/configure',{method:'POST',body:JSON.stringify({source:$('visionSource').value.trim(),enabled:false})})).vision);
 $('visionReset').onclick=async()=>renderVision((await api('/api/vision/reset',{method:'POST',body:'{}'})).vision);
 $('visionRetry').onclick=async()=>renderVision((await api('/api/vision/retry',{method:'POST',body:'{}'})).vision);
@@ -207,11 +216,11 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _authenticated(self) -> bool:
         verifier = self._clerk()
-        if verifier is None:
-            return True
         if self.command not in SAFE_METHODS and not self._same_site():
             self.log_message("rejected a cross-site %s", self.command)
             return False
+        if verifier is None:
+            return True
         session = self._cookie(CLERK_SESSION_COOKIE)
         if not session:
             return False
@@ -271,11 +280,19 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         dashboard = self.path == "/" or self.path.startswith("/?")
-        if not dashboard and not self._authenticated():
+        preview_page = self.path == "/vision-preview"
+        if not dashboard and not preview_page and not self._authenticated():
             self._send_unauthorized()
             return
-        if dashboard:
-            body = getattr(self.server, "dashboard_html", HTML).encode("utf-8")
+        if dashboard or preview_page:
+            if preview_page and not self._authenticated():
+                self._send_unauthorized()
+                return
+            body = (
+                VISION_PREVIEW_HTML
+                if preview_page
+                else getattr(self.server, "dashboard_html", HTML)
+            ).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -415,7 +432,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "vision": self._vision().configure(
-                            source, payload.get("enabled") is True
+                            source,
+                            payload.get("enabled") is True,
+                            (
+                                payload.get("color_enabled")
+                                if isinstance(payload.get("color_enabled"), bool)
+                                else None
+                            ),
                         ),
                     }
                 )
@@ -622,30 +645,61 @@ class GantryHTTPServer(ThreadingHTTPServer):
     vision_manager: Optional[VisionManager] = None
 
 
+LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def web_clerk_settings(
+    host: str,
+    *,
+    allow_network: bool,
+    require_clerk: bool,
+    clerk: Optional[ClerkSettings],
+) -> Optional[ClerkSettings]:
+    settings = clerk
+    if require_clerk:
+        if settings is None:
+            settings = ClerkSettings.require_from_environment()
+    if host not in LOOPBACK_HOSTS and settings is None and not allow_network:
+        raise ValidationError(
+            "refusing an unauthenticated network-visible dashboard; use the default "
+            "127.0.0.1 bind, pass --allow-network, or pass --require-clerk"
+        )
+    return settings
+
+
 def run_web_server(
     *,
     config: AppConfig,
     state_path: str,
     journal_path: str,
     audit_path: str,
-    host: str = "0.0.0.0",
+    host: str = "127.0.0.1",
     port: int = 8000,
     open_browser: bool = True,
     demo: bool = False,
     clerk: Optional[ClerkSettings] = None,
+    allow_network: bool = False,
+    require_clerk: bool = False,
 ) -> None:
     if not 1 <= port <= 65_535:
         raise ValidationError("web port must be between 1 and 65535")
-    clerk_settings = (
-        ClerkSettings.require_from_environment() if clerk is None else clerk
+    clerk_settings = web_clerk_settings(
+        host,
+        allow_network=allow_network,
+        require_clerk=require_clerk,
+        clerk=clerk,
     )
 
     service = GantryService(config, state_path, journal_path, audit_path)
     controller = GantryController(config, service, demo=demo)
     RequestHandler.controller = controller
     server = GantryHTTPServer((host, port), RequestHandler)
-    server.clerk_verifier = ClerkVerifier(clerk_settings)
-    server.dashboard_html = render_dashboard(HTML, clerk_settings)
+    server.clerk_verifier = (
+        ClerkVerifier(clerk_settings) if clerk_settings is not None else None
+    )
+    server.dashboard_html = (
+        render_dashboard(HTML, clerk_settings) if clerk_settings is not None else HTML
+    )
     root = Path.cwd().resolve()
     server.operation_manager = OperationManager(
         root,
@@ -695,11 +749,18 @@ def run_web_server(
             " can reach the dashboard, including the public internet behind a port"
             " forward or tunnel."
         )
-    print(f"Clerk sign-in is required; frontend API {clerk_settings.frontend_api}")
-    print(
-        "Every user who can sign up in that Clerk instance can move the gantry."
-        " Restrict sign-ups in the Clerk dashboard if that is not what you want."
-    )
+    if clerk_settings is None:
+        print("Authentication is disabled.")
+        if every_interface or host not in LOOPBACK_HOSTS:
+            print(
+                "WARNING: every user who can reach this address can control the gantry."
+            )
+    else:
+        print(f"Clerk sign-in is required; frontend API {clerk_settings.frontend_api}")
+        print(
+            "Every user who can sign up in that Clerk instance can move the gantry."
+            " Restrict sign-ups in the Clerk dashboard if that is not what you want."
+        )
     print("Press Control-C to stop it.")
 
     if open_browser:

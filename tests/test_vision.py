@@ -12,6 +12,8 @@ from chess_gantry.errors import ValidationError
 from chess_gantry.vision import (
     VisionBoardTracker,
     VisionManager,
+    annotated_color_frame,
+    detect_color_pieces,
     generate_marker_pack,
     marker_manifest,
     synthetic_board_frame,
@@ -19,6 +21,32 @@ from chess_gantry.vision import (
 
 
 class VisionTests(unittest.TestCase):
+    def test_color_caps_map_to_piece_types_squares_and_coordinates(self) -> None:
+        frame = synthetic_board_frame(
+            color_pieces={"e2": "pink", "a1": "blue", "g1": "green"},
+            include_piece_markers=False,
+            perspective=True,
+        )
+        pieces, diagnostics = detect_color_pieces(frame)
+        compact = {
+            value["color"]: (value["type"], value["square"], value["coordinate"])
+            for value in pieces
+        }
+        self.assertEqual(compact["pink"], ("pawn", "e2", {"x": 4, "y": 1}))
+        self.assertEqual(compact["blue"], ("rook", "a1", {"x": 0, "y": 0}))
+        self.assertEqual(compact["green"], ("knight", "g1", {"x": 6, "y": 0}))
+        preview = annotated_color_frame(frame, pieces, diagnostics)
+        self.assertEqual(preview.shape, frame.shape)
+        self.assertFalse((preview == frame).all())
+
+    def test_color_recognition_requires_all_board_references(self) -> None:
+        frame = synthetic_board_frame(
+            color_pieces={"e2": "pink"}, include_piece_markers=False
+        )
+        frame[:220, :220] = 255
+        with self.assertRaisesRegex(ValidationError, "reference marker"):
+            detect_color_pieces(frame)
+
     def test_manifest_assigns_unique_ids_to_all_standard_pieces(self) -> None:
         manifest = marker_manifest()
         pieces = manifest["pieces"]
@@ -225,6 +253,51 @@ class VisionTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertEqual(status["last_move"], "e2e4")
             self.assertTrue(manager.preview_jpeg().startswith(b"\xff\xd8"))
+        finally:
+            manager.close()
+
+    def test_manager_reports_color_caps_and_annotated_preview(self) -> None:
+        manager = VisionManager(source="demo-colors", enabled=True, frame_hz=20)
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                status = manager.status()
+                if status["color_state"] == "ready":
+                    break
+                time.sleep(0.02)
+            self.assertEqual(status["color_state"], "ready")
+            self.assertEqual(status["color_piece_count"], 3)
+            self.assertEqual(
+                {value["square"] for value in status["color_pieces"]},
+                {"a1", "e2", "g1"},
+            )
+            self.assertTrue(manager.preview_jpeg().startswith(b"\xff\xd8"))
+        finally:
+            manager.close()
+
+    def test_stable_color_layout_reports_one_piece_movement(self) -> None:
+        manager = VisionManager()
+        try:
+            initial = [
+                {"color": "blue", "type": "rook", "square": "a1"},
+                {"color": "pink", "type": "pawn", "square": "e2"},
+                {"color": "green", "type": "knight", "square": "g1"},
+            ]
+            moved = [
+                {"color": "blue", "type": "rook", "square": "a1"},
+                {"color": "pink", "type": "pawn", "square": "e4"},
+                {"color": "green", "type": "knight", "square": "g1"},
+            ]
+            for _ in range(3):
+                manager._update_color_state(initial)
+            for _ in range(3):
+                manager._update_color_state(moved)
+            status = manager.status()
+            self.assertEqual(status["color_state"], "move")
+            self.assertEqual(
+                status["color_last_change"],
+                {"color": "pink", "type": "pawn", "from": "e2", "to": "e4"},
+            )
         finally:
             manager.close()
 

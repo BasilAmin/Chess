@@ -10,14 +10,19 @@ import urllib.request
 
 from chess_gantry.config import AppConfig
 from chess_gantry.controller import GantryController
-from chess_gantry.errors import ValidationError
+from chess_gantry.errors import ConfigurationError, ValidationError
 from chess_gantry.models import BoardState
 from chess_gantry.live_game import LiveGameManager
 from chess_gantry.operations import OperationManager, OperationSpec
 from chess_gantry.reed_switch import SimulatedReedSwitch
 from chess_gantry.persistence import atomic_write_json
 from chess_gantry.service import GantryService
-from chess_gantry.web_app import HTML, GantryHTTPServer, RequestHandler
+from chess_gantry.web_app import (
+    HTML,
+    GantryHTTPServer,
+    RequestHandler,
+    web_clerk_settings,
+)
 from chess_gantry.clerk_auth import ClerkSettings, render_dashboard
 from chess_gantry.board_sensor import SyntheticBoardSensor
 from chess_gantry.vision import VisionManager
@@ -35,6 +40,46 @@ class StubClerkVerifier:
         if session != self.accepted:
             raise ValidationError("the stub verifier rejected the session cookie")
         return {"sub": "user_stub"}
+
+
+class WebSecurityModeTests(unittest.TestCase):
+    def test_loopback_runs_without_clerk(self) -> None:
+        self.assertIsNone(
+            web_clerk_settings(
+                "127.0.0.1",
+                allow_network=False,
+                require_clerk=False,
+                clerk=None,
+            )
+        )
+
+    def test_network_bind_requires_explicit_opt_in(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "--allow-network"):
+            web_clerk_settings(
+                "0.0.0.0",
+                allow_network=False,
+                require_clerk=False,
+                clerk=None,
+            )
+
+    def test_network_opt_in_runs_without_clerk(self) -> None:
+        self.assertIsNone(
+            web_clerk_settings(
+                "0.0.0.0",
+                allow_network=True,
+                require_clerk=False,
+                clerk=None,
+            )
+        )
+
+    def test_explicit_clerk_mode_requires_environment_key(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "CLERK_PUBLISHABLE_KEY"):
+            web_clerk_settings(
+                "127.0.0.1",
+                allow_network=False,
+                require_clerk=True,
+                clerk=None,
+            )
 
 
 class WebAppTests(unittest.TestCase):
@@ -207,8 +252,11 @@ class WebAppTests(unittest.TestCase):
         self.assertIn('id="visionSource"', html)
         self.assertIn('id="visionMoveDetail"', html)
         self.assertIn('id="visionRetry"', html)
+        self.assertIn('id="visionColors"', html)
+        self.assertIn('id="visionPopout"', html)
+        self.assertIn('id="visionColorPieces"', html)
         self.assertIn("/api/vision/status", html)
-        self.assertIn("Overhead exact-piece vision", html)
+        self.assertIn("Overhead board vision", html)
 
     def test_reed_switch_api_reports_open_and_closed(self) -> None:
         _, first = self.request("/api/reed", {})
@@ -279,6 +327,24 @@ class WebAppTests(unittest.TestCase):
         ) as response:
             self.assertEqual(response.headers["Content-Type"], "image/jpeg")
             self.assertTrue(response.read().startswith(b"\xff\xd8"))
+
+    def test_color_demo_reports_pieces_and_popout_page(self) -> None:
+        _, configured = self.request(
+            "/api/vision/configure",
+            {"source": "demo-colors", "enabled": True, "color_enabled": True},
+        )
+        self.assertTrue(configured["vision"]["color_enabled"])
+        for _ in range(150):
+            _, status = self.request("/api/vision/status")
+            if status["vision"]["color_state"] == "ready":
+                break
+            threading.Event().wait(0.02)
+        self.assertEqual(status["vision"]["color_piece_count"], 3)
+        with urllib.request.urlopen(
+            self.base + "/vision-preview", timeout=3
+        ) as response:
+            page = response.read().decode("utf-8")
+        self.assertIn("Pink = pawn", page)
 
     def test_vision_preview_without_a_frame_is_a_controlled_conflict(self) -> None:
         request = urllib.request.Request(self.base + "/api/vision/frame")

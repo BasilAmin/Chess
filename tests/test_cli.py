@@ -139,6 +139,26 @@ class RunCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn('"last_move": "e2e4"', buffer.getvalue())
 
+    def test_vision_test_reports_requested_color_mapping(self) -> None:
+        buffer = StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = run(
+                self.args(
+                    "vision-test",
+                    "--source",
+                    "demo-colors",
+                    "--frames",
+                    "1",
+                    "--colors",
+                )
+            )
+        self.assertEqual(code, 0)
+        output = buffer.getvalue()
+        self.assertIn('"pink": "pawn"', output)
+        self.assertIn('"blue": "rook"', output)
+        self.assertIn('"green": "knight"', output)
+        self.assertIn('"square": "e2"', output)
+
     def test_vision_markers_generates_complete_pack(self) -> None:
         output = Path(self._temporary.name) / "markers"
         buffer = StringIO()
@@ -155,6 +175,14 @@ class RunCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(len(list(output.glob("marker-*.png"))), 36)
         self.assertTrue((output / "manifest.json").is_file())
+
+    def test_web_defaults_to_unauthenticated_loopback(self) -> None:
+        from chess_gantry.cli import _parser
+
+        args = _parser().parse_args(["web"])
+        self.assertEqual(args.host, "127.0.0.1")
+        self.assertFalse(args.allow_network)
+        self.assertFalse(args.require_clerk)
 
     def test_workspace_test_dry_run_generates_full_grid(self) -> None:
         buffer = StringIO()

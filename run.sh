@@ -19,12 +19,6 @@ VIDEO_DEVICE="${CHESS_GANTRY_VIDEO_DEVICE:-}"
 APP_UID="${CHESS_GANTRY_APP_UID:-65532}"
 APP_GID="${CHESS_GANTRY_APP_GID:-65532}"
 
-if [[ -z $CLERK_PUBLISHABLE_KEY ]]; then
-  printf 'Export CLERK_PUBLISHABLE_KEY before running %s.\n' "$0" >&2
-  printf 'Copy it from the Clerk dashboard; it looks like pk_test_abc123...\n' >&2
-  exit 2
-fi
-
 if [[ "$(uname -s)" == Linux ]] && command -v sudo > /dev/null 2>&1; then
   printf '==> Preparing the Docker service; sudo will ask for your password\n'
   sudo usermod -aG docker "$USER" || printf '    usermod skipped; is Docker installed?\n'
@@ -182,7 +176,6 @@ RUN_ARGS=(
   --publish "${BIND_ADDRESS}:${HTTP_PORT}:${APP_PORT}"
   --volume "$ROOT/config.json:/app/config.json:ro"
   --volume "$ROOT/data:/app/data"
-  --env "CLERK_PUBLISHABLE_KEY=$CLERK_PUBLISHABLE_KEY"
   --env "CHESS_GANTRY_PUBLIC_HOST=$MDNS_NAME"
   --env "CHESS_GANTRY_WEB_HOST=0.0.0.0"
   --env "CHESS_GANTRY_WEB_PORT=$APP_PORT"
@@ -190,6 +183,13 @@ RUN_ARGS=(
   --env "CHESS_GANTRY_MCP23017_ADDRESS=0x20"
   --env "CHESS_GANTRY_DISTROLESS=1"
 )
+
+if [[ -n $CLERK_PUBLISHABLE_KEY ]]; then
+  RUN_ARGS+=(--env "CLERK_PUBLISHABLE_KEY=$CLERK_PUBLISHABLE_KEY")
+  printf '==> Clerk authentication enabled\n'
+else
+  printf '==> WARNING: Clerk is unset; anyone who can reach the dashboard can control the gantry\n'
+fi
 
 if [[ -n $CAMERA_SOURCE && -n $VIDEO_DEVICE ]]; then
   printf 'Set only CHESS_GANTRY_CAMERA_SOURCE or CHESS_GANTRY_VIDEO_DEVICE, not both.\n' >&2

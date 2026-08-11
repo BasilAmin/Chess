@@ -56,7 +56,7 @@ flowchart LR
 | Rules     | `python-chess` legal move matching and FEN tracking                  |
 | Motion    | Collision-aware routes, bounded coordinates, Marlin acknowledgements |
 | State     | Atomic local JSON and append-only audit log                          |
-| Web       | Clerk-authenticated operator dashboard                               |
+| Web       | Local operator dashboard; optional Clerk authentication              |
 | Runtime   | Fedora 42 builder, final `FROM scratch`, UID/GID 65532               |
 
 > [!WARNING]
@@ -126,10 +126,7 @@ coordinate systems:
 
 ### Start The Demo Dashboard
 
-Use a Clerk development publishable key for plain HTTP:
-
 ```bash
-export CLERK_PUBLISHABLE_KEY="pk_test_your_key"
 ./scripts/live_demo.sh
 ```
 
@@ -271,6 +268,60 @@ uv run chess-gantry vision-test \
 Keep the phone powered, disable sleep, and place it on the same non-isolated LAN
 as the Pi. In a container, `localhost` means the container, not the phone.
 
+#### Phone Camera In The Web UI
+
+1. Install an IP-camera app that exposes MJPEG, RTSP, or a JPEG snapshot.
+2. Select the rear normal-angle camera and at least 1080p, preferably 1440p.
+3. Mount the phone directly above the board and disable sleep.
+4. Confirm the URL opens from the gantry computer's browser. Typical endpoints
+   are `http://PHONE_IP:8080/video` and `http://PHONE_IP:8080/shot.jpg`.
+5. Start the local UI:
+
+```bash
+uv run chess-gantry --config config.demo.json web --demo
+```
+
+6. Open <http://127.0.0.1:8000> and find **Overhead board vision**.
+7. Enter either `http://PHONE_IP:8080/video` or
+   `snapshot:http://PHONE_IP:8080/shot.jpg`.
+8. Enable **Pink pawn · blue rook · green knight** and press **Start camera**.
+9. Press **Open camera window** to keep an annotated live view visible.
+
+The camera window draws the calibrated 8 x 8 grid, colored bounding boxes, piece
+types, and algebraic squares. The status list also reports board `{x,y}` and raw
+image coordinates.
+
+Color mapping:
+
+| Cap color | Classified type |
+| --------- | --------------- |
+| Pink      | Pawn            |
+| Blue      | Rook            |
+| Green     | Knight          |
+
+Color recognition still requires board-reference markers `0`, `1`, `2`, and
+`3`; only the piece markers are optional. Place those references around the
+board exactly as shown in the camera layout. Test without a phone first by using
+`demo-colors` as the camera source.
+
+CLI color test:
+
+```bash
+uv run chess-gantry vision-test \
+  --source 'snapshot:http://PHONE_IP:8080/shot.jpg' \
+  --colors --frames 10 --interval 0.3 \
+  --preview-output data/color-preview.jpg
+```
+
+Open `data/color-preview.jpg` to inspect the labels. The CLI JSON lists every
+recognized colored piece and square.
+
+> [!IMPORTANT]
+> Color identifies only the requested type. It does not identify side or a
+> permanent physical piece. A pink cap means “pawn on e4,” not necessarily
+> “White's original e-pawn.” Use unique ArUco piece tags for exact identity and
+> automatic Lichess or physical-board writes.
+
 ### Use A USB Camera
 
 ```bash
@@ -374,7 +425,7 @@ until a verified physical 64-square mapping is supplied.
 
 - Raspberry Pi with 64-bit ARM OS; 32-bit `armv7l` is rejected
 - Docker Engine
-- Clerk development publishable key for plain-HTTP dashboard access
+- Optional Clerk development key for authenticated network access
 - Optional `/dev/ttyUSB0`, `/dev/i2c-1`, and `/dev/video*`
 
 ### Install
@@ -384,7 +435,6 @@ sudo apt update
 sudo apt install -y git curl
 git clone --recurse-submodules https://github.com/odinglyn0/Chess.git
 cd Chess
-export CLERK_PUBLISHABLE_KEY="pk_test_your_key"
 ./scripts/install_pi.sh
 ```
 
@@ -395,26 +445,24 @@ If the installer enables I2C, reboot and rerun it.
 No camera:
 
 ```bash
-export CLERK_PUBLISHABLE_KEY="pk_test_your_key"
 ./run.sh
 ```
 
 Phone camera:
 
 ```bash
-export CLERK_PUBLISHABLE_KEY="pk_test_your_key"
 CHESS_GANTRY_CAMERA_SOURCE='snapshot:http://PHONE_IP:8080/shot.jpg' ./run.sh
 ```
 
 USB/V4L2 camera:
 
 ```bash
-export CLERK_PUBLISHABLE_KEY="pk_test_your_key"
 CHESS_GANTRY_VIDEO_DEVICE=/dev/video0 ./run.sh
 ```
 
 Open the printed URL, normally `http://chess.local` or the Pi's LAN address.
-Control-C stops and removes the foreground container.
+Control-C stops and removes the foreground container. Without Clerk, anyone who
+can reach that LAN address can control the gantry.
 
 `run.sh` builds the image, creates missing local state, mounts `config.json` and
 `data/`, attaches available serial/I2C/camera devices with their host groups,
@@ -453,7 +501,6 @@ docker inspect --format '{{.State.Health.Status}}' chess-gantry
 ```bash
 git pull --ff-only
 git submodule update --init --recursive
-export CLERK_PUBLISHABLE_KEY="pk_test_your_key"
 ./run.sh
 ```
 
@@ -600,19 +647,29 @@ before any further movement.
 Local hardware dashboard:
 
 ```bash
-export CLERK_PUBLISHABLE_KEY="pk_test_your_key"
-uv run chess-gantry --config config.json web --host 127.0.0.1
+uv run chess-gantry --config config.json web
 ```
 
 Trusted LAN:
 
 ```bash
-export CLERK_PUBLISHABLE_KEY="pk_test_your_key"
 ./scripts/run_network_ui.sh
 ```
 
+Local mode requires no account or environment variable. The LAN script
+explicitly enables unauthenticated network access, so every reachable user can
+control the gantry. Keep it on a trusted network and never expose it directly to
+the public internet.
+
+To require Clerk sign-in instead:
+
+```bash
+export CLERK_PUBLISHABLE_KEY='pk_test_your_real_key'
+uv run chess-gantry --config config.json web \
+  --host 0.0.0.0 --require-clerk --no-browser
+```
+
 Use a Clerk `pk_test_` instance over plain HTTP and restrict who may sign in.
-Do not expose the dashboard directly to the public internet.
 
 The dashboard owns one shared serial connection and provides position, jogging,
 homing, guarded demos, planning/execution, recovery, vision, synthetic occupancy,
@@ -699,7 +756,6 @@ the dashboard:
 
 ```bash
 export LICHESS_TOKEN="lip_your_board_api_token"
-export CLERK_PUBLISHABLE_KEY="pk_test_your_key"
 ./run.sh
 ```
 
@@ -748,7 +804,7 @@ then use the manufacturer's supported Marlin procedure.
 | Symptom                      | First action                                                         |
 | ---------------------------- | -------------------------------------------------------------------- |
 | Pending-move error           | Run `uv run chess-gantry --config config.json reconcile`             |
-| Dashboard exits              | Verify `CLERK_PUBLISHABLE_KEY` is exported                           |
+| Dashboard refuses LAN bind   | Use `run_network_ui.sh`, `--allow-network`, or `--require-clerk`     |
 | `chess.local` fails          | Use the printed numeric Pi IP                                        |
 | Serial missing               | Run `ls -l /dev/ttyUSB* /dev/ttyACM*` and `chess-gantry ports`       |
 | Container enters demo mode   | Set `CHESS_GANTRY_SERIAL_PORT` to the actual device                  |
@@ -785,7 +841,7 @@ uv run chess-gantry COMMAND --help
 ```
 
 The suite covers geometry, path planning, persistence, serial acknowledgements,
-firmware configuration, distroless deployment, Clerk authentication, dashboard
+firmware configuration, distroless deployment, optional Clerk authentication, dashboard
 ownership, reed diagnostics, exact-piece vision, perspective distortion,
 captures, castling, promotion, fusion vetoes, camera lifecycle, and guarded
 Lichess submission.

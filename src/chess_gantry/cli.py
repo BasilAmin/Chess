@@ -324,6 +324,15 @@ def _parser() -> ArgumentParser:
         default=24.0,
         help="minimum detected marker side in pixels (default: 24)",
     )
+    vision_test.add_argument(
+        "--colors",
+        action="store_true",
+        help="detect pink pawns, blue rooks, and green knights by board square",
+    )
+    vision_test.add_argument(
+        "--preview-output",
+        help="write the latest annotated color frame to this JPEG or PNG path",
+    )
 
     reference_gantry = commands.add_parser(
         "reference-gantry",
@@ -356,8 +365,8 @@ def _parser() -> ArgumentParser:
     web = commands.add_parser("web", help="launch the browser controller")
     web.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="bind address (default: every interface)",
+        default="127.0.0.1",
+        help="bind address (default: local only)",
     )
     web.add_argument(
         "--web-port", type=int, default=8000, help="browser port (default: 8000)"
@@ -367,6 +376,16 @@ def _parser() -> ArgumentParser:
     )
     web.add_argument(
         "--demo", action="store_true", help="run with a simulated Marlin controller"
+    )
+    web.add_argument(
+        "--allow-network",
+        action="store_true",
+        help="allow an unauthenticated non-loopback bind; every reachable user can control the gantry",
+    )
+    web.add_argument(
+        "--require-clerk",
+        action="store_true",
+        help="require Clerk sign-in using $CLERK_PUBLISHABLE_KEY",
     )
 
     console = commands.add_parser(
@@ -1003,7 +1022,12 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             return 0
 
         if args.command == "vision-test":
-            from .vision import VisionBoardTracker, open_frame_source
+            from .vision import (
+                VisionBoardTracker,
+                annotated_color_frame,
+                detect_color_pieces,
+                open_frame_source,
+            )
 
             if args.frames < 0:
                 parser.error("--frames cannot be negative")
@@ -1017,7 +1041,35 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             frame_index = 0
             try:
                 while args.frames == 0 or frame_index < args.frames:
-                    status = tracker.process_frame(reader.read())
+                    frame = reader.read()
+                    if args.colors:
+                        pieces, diagnostics = detect_color_pieces(frame)
+                        status = {
+                            "source": args.source,
+                            "color_mapping": {
+                                "pink": "pawn",
+                                "blue": "rook",
+                                "green": "knight",
+                            },
+                            "color_pieces": pieces,
+                            "color_piece_count": len(pieces),
+                            "board_area_ratio": diagnostics["board_area_ratio"],
+                        }
+                        if args.preview_output:
+                            from .vision import _vision_modules
+
+                            cv2, _ = _vision_modules()
+                            target = Path(args.preview_output)
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            if not cv2.imwrite(
+                                str(target),
+                                annotated_color_frame(frame, pieces, diagnostics),
+                            ):
+                                raise ValidationError(
+                                    f"could not write annotated preview {target}"
+                                )
+                    else:
+                        status = tracker.process_frame(frame)
                     frame_index += 1
                     _print_json(status)
                     if args.frames == 0 or frame_index < args.frames:
@@ -1058,6 +1110,8 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                 port=args.web_port,
                 open_browser=not args.no_browser,
                 demo=args.demo,
+                allow_network=args.allow_network,
+                require_clerk=args.require_clerk,
             )
             return 0
 
