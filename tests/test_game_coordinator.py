@@ -62,6 +62,23 @@ class FakeClient:
         self.board = FakeBoardAPI()
 
 
+class FakeOpponent:
+    def __init__(self, moves=("e7e5",)):
+        self.moves = list(moves)
+        self.calls = []
+
+    def choose_move(self, board, *, style="balanced"):
+        from chess_gantry.openai_opponent import OpponentMove
+
+        self.calls.append((board.fen(), style))
+        uci = self.moves.pop(0)
+        return OpponentMove(
+            uci=uci,
+            rationale="Develops with tempo.",
+            plan="Control the center.",
+        )
+
+
 def pgn(*moves):
     board = chess.Board()
     result = []
@@ -88,12 +105,14 @@ class CoordinatorTests(unittest.TestCase):
         self.config = AppConfig.from_mapping(raw)
         self.vision = FakeVision()
         self.client = FakeClient()
+        self.opponent = FakeOpponent()
         self.coordinator = GameCoordinator(
             self.root,
             self.config,
             self.vision,
             demo=True,
             client_factory=lambda token: self.client,
+            opponent=self.opponent,
         )
 
     def tearDown(self):
@@ -223,6 +242,63 @@ class CoordinatorTests(unittest.TestCase):
             self.coordinator.start(
                 mode="local", game_id=None, local_color=None, confirm_motion=False
             )
+
+    def test_openai_black_moves_after_human_camera_move(self):
+        self.coordinator.start(
+            mode="openai",
+            game_id=None,
+            local_color="white",
+            confirm_motion=True,
+            opponent_style="positional",
+        )
+        self.coordinator.on_camera_move("e2e4")
+        status = self.coordinator.status()["status"]
+        self.assertEqual(status["confirmed_ply"], 2)
+        self.assertEqual(status["executed_count"], 1)
+        self.assertEqual(status["history"][0]["actor"], "human")
+        self.assertEqual(status["history"][1]["actor"], "openai")
+        self.assertEqual(status["history"][1]["uci"], "e7e5")
+        self.assertEqual(status["last_ai"]["rationale"], "Develops with tempo.")
+        self.assertEqual(self.opponent.calls[0][1], "positional")
+        self.assertEqual(self.vision.expected, ["e7e5"])
+
+    def test_openai_white_moves_first(self):
+        self.opponent.moves = ["e2e4"]
+        self.coordinator.start(
+            mode="openai",
+            game_id=None,
+            local_color="black",
+            confirm_motion=True,
+            opponent_style="aggressive",
+        )
+        deadline = __import__("time").monotonic() + 2
+        while self.coordinator.status()["status"]["confirmed_ply"] == 0:
+            if __import__("time").monotonic() >= deadline:
+                self.fail("OpenAI first move did not execute")
+            __import__("time").sleep(0.01)
+        status = self.coordinator.status()["status"]
+        self.assertEqual(status["history"][0]["actor"], "openai")
+        self.assertEqual(status["history"][0]["uci"], "e2e4")
+
+    def test_openai_mode_does_not_require_lichess_token_or_game_id(self):
+        self.coordinator._token_provider = lambda: None
+        result = self.coordinator.start(
+            mode="openai",
+            game_id=None,
+            local_color="white",
+            confirm_motion=True,
+        )
+        self.assertEqual(result["status"]["mode"], "openai")
+
+    def test_openai_capture_remains_blocked_without_storage(self):
+        self.coordinator._mode = "openai"
+        self.coordinator._game_id = None
+        self.coordinator._service = self.coordinator._new_service("openai-capture")
+        self.coordinator._board = chess.Board()
+        for uci in ("e2e4", "d7d5"):
+            self.coordinator._execute_remote(uci, actor="openai")
+        with self.assertRaisesRegex(ConfigurationError, "capture storage"):
+            self.coordinator._execute_remote("e4d5", actor="openai")
 
 
 if __name__ == "__main__":

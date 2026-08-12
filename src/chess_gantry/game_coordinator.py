@@ -12,6 +12,7 @@ from .config import AppConfig
 from .errors import ConfigurationError, ValidationError
 from .lichess_pgn import chess_move_deltas, fetch_pgn, lichess_client
 from .models import BoardState
+from .openai_opponent import SolChessOpponent
 from .persistence import atomic_write_json
 from .serial_link import DemoMarlinSerial, MarlinSerial
 from .service import GantryService
@@ -37,6 +38,7 @@ class GameCoordinator:
         client_factory: Any = lichess_client,
         pgn_fetcher: Any = fetch_pgn,
         token_provider: Optional[Any] = None,
+        opponent: Optional[Any] = None,
     ) -> None:
         self.root = root
         self.config = config
@@ -47,6 +49,7 @@ class GameCoordinator:
         self._token_provider = token_provider or (
             lambda: os.environ.get("LICHESS_TOKEN", "").strip() or None
         )
+        self._opponent = opponent
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -64,6 +67,9 @@ class GameCoordinator:
         self._executed = 0
         self._logs = ""
         self._serial_settings = config.serial
+        self._opponent_style = "balanced"
+        self._history: list[dict[str, Any]] = []
+        self._last_ai: Optional[dict[str, str]] = None
 
     def _append(self, text: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
@@ -82,10 +88,28 @@ class GameCoordinator:
                 "waiting_camera",
                 "waiting_lichess",
                 "executing",
+                "thinking",
             }
 
     def status(self) -> dict[str, Any]:
+        import chess
+
         with self._lock:
+            rows = None
+            if self._board is not None:
+                rows = [
+                    "".join(
+                        (
+                            self._board.piece_at(
+                                chess.square(file_index, rank)
+                            ).symbol()
+                            if self._board.piece_at(chess.square(file_index, rank))
+                            else "."
+                        )
+                        for file_index in range(8)
+                    )
+                    for rank in range(7, -1, -1)
+                ]
             return {
                 "status": {
                     "state": self._state,
@@ -102,6 +126,24 @@ class GameCoordinator:
                     "executed_count": self._executed,
                     "pending_local_echo": self._pending_echo,
                     "error": self._error,
+                    "history": list(self._history),
+                    "last_ai": dict(self._last_ai) if self._last_ai else None,
+                    "opponent_style": self._opponent_style,
+                    "rows": rows,
+                    "legal_move_count": (
+                        self._board.legal_moves.count()
+                        if self._board is not None
+                        else 0
+                    ),
+                    "in_check": (
+                        self._board.is_check() if self._board is not None else False
+                    ),
+                    "game_over": (
+                        self._board.is_game_over() if self._board is not None else False
+                    ),
+                    "result": (
+                        self._board.result() if self._board is not None else None
+                    ),
                 },
                 "logs": self._logs,
             }
@@ -132,17 +174,20 @@ class GameCoordinator:
         confirm_motion: bool,
         serial_port: Optional[str] = None,
         serial_baudrate: Optional[int] = None,
+        opponent_style: str = "balanced",
     ) -> dict[str, Any]:
         import chess
 
-        if mode not in {"local", "lichess", "mirror"}:
-            raise ValidationError("game mode must be local, lichess, or mirror")
-        if mode != "local" and (not game_id or not game_id.isalnum()):
+        if mode not in {"local", "lichess", "mirror", "openai"}:
+            raise ValidationError("game mode must be local, lichess, mirror, or openai")
+        if mode in {"lichess", "mirror"} and (not game_id or not game_id.isalnum()):
             raise ValidationError("Lichess and mirror modes require a game ID")
-        if mode != "local" and not self._token_provider():
+        if mode in {"lichess", "mirror"} and not self._token_provider():
             raise ConfigurationError("LICHESS_TOKEN is required for Lichess game modes")
-        if mode == "lichess" and local_color not in {"white", "black"}:
-            raise ValidationError("Lichess mode requires local_color white or black")
+        if mode in {"lichess", "openai"} and local_color not in {"white", "black"}:
+            raise ValidationError(f"{mode} mode requires local_color white or black")
+        if opponent_style not in {"balanced", "aggressive", "positional", "creative"}:
+            raise ValidationError("OpenAI style is invalid")
         if mode != "mirror":
             camera = self.vision.status()
             if (
@@ -153,7 +198,11 @@ class GameCoordinator:
                 raise ConfigurationError(
                     "camera game requires two stable complete observations of the standard starting position"
                 )
-        if not self.demo and mode in {"lichess", "mirror"} and not confirm_motion:
+        if (
+            not self.demo
+            and mode in {"lichess", "mirror", "openai"}
+            and not confirm_motion
+        ):
             raise ValidationError(
                 "remote physical execution requires motion confirmation"
             )
@@ -177,6 +226,9 @@ class GameCoordinator:
             self._confirmed_ply = 0
             self._executed = 0
             self._logs = ""
+            self._history = []
+            self._last_ai = None
+            self._opponent_style = opponent_style
             self._serial_settings = self.config.serial
             if serial_port:
                 self._serial_settings = replace(self._serial_settings, port=serial_port)
@@ -195,16 +247,18 @@ class GameCoordinator:
             )
             self._client = (
                 self._client_factory(self._token_provider())
-                if mode != "local"
+                if mode in {"lichess", "mirror"}
                 else None
             )
+            if mode == "openai" and self._opponent is None:
+                self._opponent = SolChessOpponent()
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
         return self.status()
 
     def _run(self) -> None:
         try:
-            if self._mode in {"lichess", "mirror"}:
+            if self._mode in {"lichess", "mirror", "openai"}:
                 link_type = DemoMarlinSerial if self.demo else MarlinSerial
                 self._link = link_type(self._serial_settings)
                 with self._link:
@@ -212,8 +266,15 @@ class GameCoordinator:
                     self._append("Homing gantry on the game serial connection.")
                     assert self._service is not None
                     self._service.home_with_link(self._link)
-                    self._state = "waiting_lichess"
-                    self._follow_lichess()
+                    if self._mode == "openai":
+                        self._state = "waiting_camera"
+                        if self._local_color == "black":
+                            self._play_openai_move()
+                        while not self._stop.wait(0.5):
+                            pass
+                    else:
+                        self._state = "waiting_lichess"
+                        self._follow_lichess()
             else:
                 self._state = "waiting_camera"
                 while not self._stop.wait(0.5):
@@ -231,13 +292,16 @@ class GameCoordinator:
         import chess
 
         with self._lock:
-            if self._mode not in {"local", "lichess"} or self._board is None:
+            if self._mode not in {"local", "lichess", "openai"} or self._board is None:
                 return
             move = chess.Move.from_uci(uci)
             if move not in self._board.legal_moves:
                 raise ValidationError(f"camera move {uci} is illegal")
             moving_color = "white" if self._board.turn else "black"
-            if self._mode == "lichess" and moving_color != self._local_color:
+            if (
+                self._mode in {"lichess", "openai"}
+                and moving_color != self._local_color
+            ):
                 raise ValidationError("camera detected a move for the remote side")
             assert self._service is not None
             event = f"{self._game_id or 'local'}.{self._board.ply() + 1}.camera"
@@ -245,6 +309,7 @@ class GameCoordinator:
                 self._board, move, self._service.store.load(), event
             )
             self._service.commit_observed_moves(deltas)
+            san = self._board.san(move)
             if self._mode == "lichess":
                 assert self._client is not None and self._game_id is not None
                 self._client.board.make_move(self._game_id, uci)
@@ -253,10 +318,30 @@ class GameCoordinator:
             else:
                 self._append(f"Registered local camera move {uci}.")
             self._board.push(move)
+            self._history.append(
+                {"ply": self._board.ply(), "uci": uci, "san": san, "actor": "human"}
+            )
             self._confirmed_ply += 1
             self._state = (
                 "waiting_lichess" if self._mode == "lichess" else "waiting_camera"
             )
+            if self._mode == "openai":
+                self._play_openai_move()
+
+    def _play_openai_move(self) -> None:
+        assert self._board is not None and self._opponent is not None
+        self._state = "thinking"
+        self._append("OpenAI Sol is choosing from the server legal-move allowlist.")
+        choice = self._opponent.choose_move(self._board, style=self._opponent_style)
+        move = self._board.parse_uci(choice.uci)
+        san = self._board.san(move)
+        self._last_ai = {
+            "uci": choice.uci,
+            "san": san,
+            "rationale": choice.rationale,
+            "plan": choice.plan,
+        }
+        self._execute_remote(choice.uci, actor="openai", san=san)
 
     def _follow_lichess(self) -> None:
         assert self._client is not None and self._game_id is not None
@@ -282,7 +367,9 @@ class GameCoordinator:
                 )
                 self._pending_echo = None
 
-    def _execute_remote(self, uci: str) -> None:
+    def _execute_remote(
+        self, uci: str, *, actor: str = "remote", san: Optional[str] = None
+    ) -> None:
         import chess
 
         assert self._board is not None and self._service is not None
@@ -293,7 +380,8 @@ class GameCoordinator:
             raise ConfigurationError(
                 "remote capture blocked: capture storage is not calibrated"
             )
-        event = f"{self._game_id}.{self._board.ply() + 1}.remote"
+        event = f"{self._game_id or self._mode}.{self._board.ply() + 1}.{actor}"
+        notation = san or self._board.san(move)
         deltas = chess_move_deltas(self._board, move, self._service.store.load(), event)
         self._state = "executing"
         self.vision.pause_inference(True)
@@ -310,8 +398,16 @@ class GameCoordinator:
         self.vision.pause_inference(False)
         self._confirmed_ply += 1
         self._executed += 1
-        self._state = "waiting_lichess"
-        self._append(f"Physically executed remote move {uci}.")
+        self._history.append(
+            {
+                "ply": self._board.ply(),
+                "uci": uci,
+                "san": notation,
+                "actor": actor,
+            }
+        )
+        self._state = "waiting_camera" if self._mode == "openai" else "waiting_lichess"
+        self._append(f"Physically executed {actor} move {uci} ({notation}).")
 
     def stop(self) -> dict[str, Any]:
         with self._lock:

@@ -50,6 +50,7 @@ data/**
 
 # Editor, OS, and temporary files
 .idea/
+.kilo/
 .DS_Store
 Thumbs.db
 *.log
