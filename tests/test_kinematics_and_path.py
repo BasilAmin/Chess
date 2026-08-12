@@ -6,7 +6,11 @@ from chess_gantry.config import BoardGeometry, PlannerSettings, Workspace
 from chess_gantry.errors import PlanningError
 from chess_gantry.kinematics import grid_to_machine
 from chess_gantry.models import GridPosition, MachinePoint
-from chess_gantry.path_planning import astar_path, segment_is_clear
+from chess_gantry.path_planning import (
+    astar_path,
+    safest_path_to_any_goal,
+    segment_is_clear,
+)
 
 
 class KinematicsTests(unittest.TestCase):
@@ -60,6 +64,39 @@ class AStarTests(unittest.TestCase):
                 MachinePoint(0.0, 10.0),
                 MachinePoint(100.0, 10.0),
                 [MachinePoint(50.0, 10.0)],
+                workspace,
+                self.settings(keepout=30.0),
+            )
+
+    def test_capture_route_prefers_clearer_chute_over_nearer_chute(self) -> None:
+        workspace = Workspace(0.0, 100.0, 0.0, 100.0)
+        start = MachinePoint(90.0, 20.0)
+        lower = MachinePoint(0.0, 0.0)
+        upper = MachinePoint(0.0, 100.0)
+        obstacles = (
+            MachinePoint(40.0, 15.0),
+            MachinePoint(20.0, 25.0),
+        )
+        path = safest_path_to_any_goal(
+            start,
+            (lower, upper),
+            obstacles,
+            workspace,
+            self.settings(keepout=15.0),
+        )
+        self.assertEqual(path[-1], upper)
+        for segment_start, segment_end in zip(path, path[1:]):
+            self.assertTrue(
+                segment_is_clear(segment_start, segment_end, obstacles, 15.0)
+            )
+
+    def test_capture_route_fails_closed_when_all_chutes_are_blocked(self) -> None:
+        workspace = Workspace(0.0, 100.0, 0.0, 20.0)
+        with self.assertRaisesRegex(PlanningError, "magnetically clear"):
+            safest_path_to_any_goal(
+                MachinePoint(100.0, 10.0),
+                (MachinePoint(0.0, 0.0), MachinePoint(0.0, 20.0)),
+                (MachinePoint(50.0, 10.0),),
                 workspace,
                 self.settings(keepout=30.0),
             )

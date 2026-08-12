@@ -34,7 +34,7 @@ from .models import (
     PieceState,
     PieceTransfer,
 )
-from .path_planning import plan_path
+from .path_planning import plan_path, safest_path_to_any_goal
 from .persistence import (
     AuditLog,
     BoardStore,
@@ -138,6 +138,24 @@ class GantryService:
             )
         return self.config.capture.slots[capture_slot]
 
+    def _capture_ejection_path(
+        self,
+        start: MachinePoint,
+        obstacles: Sequence[MachinePoint],
+    ) -> Tuple[MachinePoint, ...]:
+        settings = replace(
+            self.config.planner,
+            kind="astar",
+            obstacle_keepout_mm=self.config.capture.magnetic_keepout_mm,
+        )
+        return safest_path_to_any_goal(
+            start,
+            self.config.capture.eject_points,
+            obstacles,
+            self.config.workspace,
+            settings,
+        )
+
     def _physical_obstacles(
         self,
         state: BoardState,
@@ -185,18 +203,24 @@ class GantryService:
             captured_position = captured.board_position
             assert captured_position is not None
             capture_start = grid_to_machine(captured_position, self.config.board)
-            capture_end = self._capture_point_for(capture_start, capture_slot)
             capture_obstacles = self._physical_obstacles(
                 board_state,
                 exclude_piece_ids={captured.piece_id},
             )
-            capture_path = plan_path(
-                capture_start,
-                capture_end,
-                capture_obstacles,
-                self.config.workspace,
-                self.config.planner,
-            )
+            if self.config.capture.mode == "eject":
+                capture_path = self._capture_ejection_path(
+                    capture_start, capture_obstacles
+                )
+                capture_end = capture_path[-1]
+            else:
+                capture_end = self._capture_point_for(capture_start, capture_slot)
+                capture_path = plan_path(
+                    capture_start,
+                    capture_end,
+                    capture_obstacles,
+                    self.config.workspace,
+                    self.config.planner,
+                )
             transfers.append(
                 PieceTransfer(
                     piece_id=captured.piece_id,
@@ -262,17 +286,11 @@ class GantryService:
         captured_position = captured.board_position
         assert captured_position is not None
         start = grid_to_machine(captured_position, self.config.board)
-        end = self._capture_point_for(start, capture_slot)
         obstacles = self._physical_obstacles(
             board_state, exclude_piece_ids={captured.piece_id}
         )
-        path = plan_path(
-            start,
-            end,
-            obstacles,
-            self.config.workspace,
-            self.config.planner,
-        )
+        path = self._capture_ejection_path(start, obstacles)
+        end = path[-1]
         transfer = PieceTransfer(
             piece_id=captured.piece_id,
             purpose="capture",

@@ -7,8 +7,10 @@ import json
 import unittest
 
 from chess_gantry.config import AppConfig
-from chess_gantry.errors import ConfigurationError, SerialProtocolError
+from chess_gantry.errors import ConfigurationError, PlanningError, SerialProtocolError
+from chess_gantry.kinematics import grid_to_machine
 from chess_gantry.models import BoardState, GridPosition, MoveDelta
+from chess_gantry.path_planning import segment_is_clear
 from chess_gantry.persistence import atomic_write_json, read_json
 from chess_gantry.serial_link import CommandResult
 from chess_gantry.service import GantryService
@@ -24,12 +26,14 @@ def test_config(
     raw["capture"]["enabled"] = capture
     if capture:
         if eject:
+            raw["planner"]["kind"] = "astar"
             raw["capture"] = {
                 "enabled": True,
                 "mode": "eject",
                 "slots": [],
                 "eject_points": [[0.0, 0.0], [0.0, 300.0]],
                 "buffer_points": [[10.0, 0.0], [10.0, 300.0]],
+                "magnetic_keepout_mm": 30.0,
             }
         else:
             raw["capture"]["mode"] = "slots"
@@ -354,6 +358,149 @@ class ServiceTests(unittest.TestCase):
                 commands[edge_move_index],
             )
             self.assertIn("M107 P0", commands[edge_move_index + 1 :])
+
+    def test_capture_ejection_keeps_energized_path_clear_of_every_piece(self) -> None:
+        with TemporaryDirectory() as directory:
+            temp = Path(directory)
+            state_path, journal_path, audit_path = self.paths(temp)
+            state = BoardState.from_mapping(
+                {
+                    "schema_version": 1,
+                    "revision": 0,
+                    "pieces": {
+                        "white_pawn_e": {"status": "board", "x": 4, "y": 3},
+                        "black_pawn_d": {"status": "board", "x": 3, "y": 4},
+                        "guard_c4": {"status": "board", "x": 2, "y": 3},
+                        "guard_c5": {"status": "board", "x": 2, "y": 4},
+                        "guard_c6": {"status": "board", "x": 2, "y": 5},
+                        "guard_b3": {"status": "board", "x": 1, "y": 2},
+                        "guard_b6": {"status": "board", "x": 1, "y": 5},
+                    },
+                    "processed_events": [],
+                }
+            )
+            atomic_write_json(state_path, state.to_dict())
+            service = GantryService(
+                test_config(capture=True, eject=True),
+                state_path,
+                journal_path,
+                audit_path,
+            )
+            move = MoveDelta.from_mapping(
+                {
+                    "position": "white_pawn_e",
+                    "px": 4,
+                    "py": 3,
+                    "nx": 3,
+                    "ny": 4,
+                    "capture": {"id": "black_pawn_d", "x": 3, "y": 4},
+                }
+            )
+            plan = service.plan_capture_ejection(move)
+            path = plan.transfers[0].path
+            obstacles = tuple(
+                grid_to_machine(piece.board_position, service.config.board)
+                for piece in state.pieces.values()
+                if piece.piece_id != "black_pawn_d"
+            )
+            self.assertGreater(len(path), 2)
+            for start, end in zip(path, path[1:]):
+                self.assertTrue(
+                    segment_is_clear(
+                        start,
+                        end,
+                        obstacles,
+                        service.config.capture.magnetic_keepout_mm,
+                    )
+                )
+
+    def test_capture_ejection_forces_astar_when_normal_moves_are_direct(self) -> None:
+        with TemporaryDirectory() as directory:
+            temp = Path(directory)
+            state_path, journal_path, audit_path = self.paths(temp)
+            state = BoardState.from_mapping(
+                {
+                    "schema_version": 1,
+                    "revision": 0,
+                    "pieces": {
+                        "capturer": {"status": "board", "x": 4, "y": 3},
+                        "captured": {"status": "board", "x": 3, "y": 4},
+                        "blocker": {"status": "board", "x": 2, "y": 4},
+                    },
+                    "processed_events": [],
+                }
+            )
+            atomic_write_json(state_path, state.to_dict())
+            raw = json.loads((ROOT / "config.example.json").read_text())
+            raw["planner"]["kind"] = "direct"
+            service = GantryService(
+                AppConfig.from_mapping(raw), state_path, journal_path, audit_path
+            )
+            plan = service.plan_capture_ejection(
+                MoveDelta.from_mapping(
+                    {
+                        "position": "capturer",
+                        "px": 4,
+                        "py": 3,
+                        "nx": 3,
+                        "ny": 4,
+                        "capture": {"id": "captured", "x": 3, "y": 4},
+                    }
+                )
+            )
+            self.assertGreater(len(plan.transfers[0].path), 2)
+
+    def test_fully_enclosed_capture_fails_before_serial_or_state_change(self) -> None:
+        with TemporaryDirectory() as directory:
+            temp = Path(directory)
+            state_path, journal_path, audit_path = self.paths(temp)
+            pieces = {
+                "capturer": {"status": "board", "x": 4, "y": 3},
+                "captured": {"status": "board", "x": 3, "y": 4},
+            }
+            for name, x, y in (
+                ("c4", 2, 3),
+                ("d4", 3, 3),
+                ("c5", 2, 4),
+                ("e5", 4, 4),
+                ("c6", 2, 5),
+                ("d6", 3, 5),
+                ("e6", 4, 5),
+            ):
+                pieces[name] = {"status": "board", "x": x, "y": y}
+            state = BoardState.from_mapping(
+                {
+                    "schema_version": 1,
+                    "revision": 0,
+                    "pieces": pieces,
+                    "processed_events": [],
+                }
+            )
+            atomic_write_json(state_path, state.to_dict())
+            service = GantryService(
+                test_config(capture=True, eject=True),
+                state_path,
+                journal_path,
+                audit_path,
+            )
+            move = MoveDelta.from_mapping(
+                {
+                    "position": "capturer",
+                    "px": 4,
+                    "py": 3,
+                    "nx": 3,
+                    "ny": 4,
+                    "capture": {"id": "captured", "x": 3, "y": 4},
+                }
+            )
+            link = FakeLink()
+            with self.assertRaisesRegex(
+                PlanningError, "magnetically clear capture-ejection route"
+            ):
+                service.execute_with_link(move, link)
+            self.assertEqual(link.programs, [])
+            self.assertFalse(journal_path.exists())
+            self.assertEqual(service.store.load().to_dict(), state.to_dict())
 
     def test_ejection_commits_before_attacker_move_and_recovers_independently(
         self,

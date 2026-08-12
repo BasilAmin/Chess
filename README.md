@@ -44,7 +44,7 @@ flowchart LR
 | Normal physical moves   | Supported with Marlin acknowledgements and local journaling     |
 | Castling                | King and rook transfers supported                               |
 | Human captures          | Supported because the human removes the captured piece          |
-| Remote gantry captures  | Captured piece is carried to the nearest calibrated edge chute  |
+| Remote gantry captures  | Captured piece follows the safest clear route to an edge chute  |
 | Promotion               | Mirror/arena use a pawn proxy; camera games require replacement |
 
 Reed switches and MCP23017 are no longer in the runtime path. Fast move
@@ -408,6 +408,8 @@ clear X10 castling buffers. It then:
 - rejects games that already contain moves;
 - opens one persistent Marlin connection;
 - homes once;
+- permits Marlin acknowledgement waits up to five minutes so long-running games
+  and compound physical moves do not fail at the previous two-minute ceiling;
 - renders an ASCII terminal board and status;
 - validates every streamed UCI move with `python-chess`;
 - verifies the remote move list still starts with the exact committed prefix;
@@ -463,7 +465,7 @@ Board API game with an authorized `LICHESS_TOKEN`, use:
 ./scripts/mirror_lichess.sh GAME_ID --stream-mode board
 ```
 
-Captures are carried to the nearest edge chute and released beyond the playing
+Captures are carried to the safest reachable edge chute and released beyond the playing
 area. En passant removes the pawn from its actual capture square. Castling uses
 three persisted physical stages: rook to buffer, king to destination, rook from
 buffer to destination. Promotion keeps the pawn as the physical proxy while the
@@ -686,10 +688,16 @@ castle buffers: X10 Y0 and X10 Y300
 ```
 
 Install a collection tray or open drop area beyond the X0 edge before running a
-game. The gantry carries the captured piece to the nearest chute and releases
+game. The gantry carries the captured piece to the safest reachable chute and releases
 the magnet; it does not launch pieces with uncontrolled acceleration. Keep the
 chute and buffer strip clear. If your physical board support does not leave the
 piece center beyond the edge at X0, recalibrate these coordinates before use.
+
+Capture transport uses a separate A* profile with a 30 mm magnetic keepout from
+every remaining piece. It evaluates every configured chute, favors the route
+with the greatest minimum clearance, and stops before energizing the magnet if
+no route can maintain that clearance. This prevents the energized carriage and
+captured piece from taking a merely short route past neighboring pieces.
 
 ## Emergency Stop
 

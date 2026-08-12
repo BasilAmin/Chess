@@ -5,7 +5,7 @@
     "fallback_baudrates": [115200, 250000],
     "read_timeout_s": 0.25,
     "write_timeout_s": 2.0,
-    "command_timeout_s": 120.0,
+    "command_timeout_s": 300.0,
     "startup_wait_s": 2.5,
     "verify_marlin": true,
     "handshake_timeout_s": 5.0
@@ -58,7 +58,8 @@
     "buffer_points": [
       [10.0, 0.0],
       [10.0, 300.0]
-    ]
+    ],
+    "magnetic_keepout_mm": 30.0
   },
   "safety": {
     "calibrated": true,

@@ -22,6 +22,7 @@ class ConfigAndGCodeTests(unittest.TestCase):
         self.assertFalse(config.safety.home_before_execute)
         self.assertEqual(config.magnet.on_commands, ("M106 P0 S255",))
         self.assertEqual(config.magnet.off_commands, ("M107 P0",))
+        self.assertEqual(config.serial.command_timeout_s, 300.0)
 
     def test_machine_and_playing_board_dimensions(self) -> None:
         config = AppConfig.from_mapping(self.raw_config())
@@ -63,6 +64,15 @@ class ConfigAndGCodeTests(unittest.TestCase):
         raw["capture"]["eject_points"] = [[0.0, 0.0]]
         raw["capture"]["buffer_points"] = []
         with self.assertRaisesRegex(ConfigurationError, "buffer point"):
+            AppConfig.from_mapping(raw)
+
+    def test_eject_capture_requires_valid_magnetic_keepout(self) -> None:
+        raw = self.raw_config()
+        raw["capture"]["magnetic_keepout_mm"] = 10.0
+        with self.assertRaisesRegex(ConfigurationError, "at least planner"):
+            AppConfig.from_mapping(raw)
+        raw["capture"]["magnetic_keepout_mm"] = 40.0
+        with self.assertRaisesRegex(ConfigurationError, "smaller than one square"):
             AppConfig.from_mapping(raw)
 
     def test_eject_and_buffer_points_must_be_outside_board_and_inside_workspace(

@@ -146,7 +146,7 @@ class SerialSettings:
                 raw.get("write_timeout_s", 2.0), "serial.write_timeout_s", positive=True
             ),
             command_timeout_s=_number(
-                raw.get("command_timeout_s", 120.0),
+                raw.get("command_timeout_s", 300.0),
                 "serial.command_timeout_s",
                 positive=True,
             ),
@@ -383,12 +383,20 @@ class CaptureSettings:
     mode: str
     eject_points: Tuple[MachinePoint, ...]
     buffer_points: Tuple[MachinePoint, ...]
+    magnetic_keepout_mm: float
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "CaptureSettings":
         _unknown(
             raw,
-            {"enabled", "slots", "mode", "eject_points", "buffer_points"},
+            {
+                "enabled",
+                "slots",
+                "mode",
+                "eject_points",
+                "buffer_points",
+                "magnetic_keepout_mm",
+            },
             "capture",
         )
         enabled = _boolean(raw.get("enabled", False), "capture.enabled")
@@ -449,6 +457,11 @@ class CaptureSettings:
             mode=mode,
             eject_points=eject_points,
             buffer_points=buffer_points,
+            magnetic_keepout_mm=_number(
+                raw.get("magnetic_keepout_mm", 30.0),
+                "capture.magnetic_keepout_mm",
+                positive=True,
+            ),
         )
 
 
@@ -629,6 +642,16 @@ class AppConfig:
             )
             if park_key in seen_slots:
                 raise ConfigurationError("motion park position overlaps a capture slot")
+
+        if self.capture.enabled and self.capture.mode == "eject":
+            if self.capture.magnetic_keepout_mm < self.planner.obstacle_keepout_mm:
+                raise ConfigurationError(
+                    "capture.magnetic_keepout_mm must be at least planner.obstacle_keepout_mm"
+                )
+            if self.capture.magnetic_keepout_mm >= self.board.square_size_mm:
+                raise ConfigurationError(
+                    "capture.magnetic_keepout_mm must be smaller than one square"
+                )
 
         if self.magnet.on_commands == self.magnet.off_commands:
             raise ConfigurationError(

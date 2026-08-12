@@ -106,6 +106,7 @@ def astar_path(
     obstacles: Sequence[MachinePoint],
     workspace: Workspace,
     settings: PlannerSettings,
+    proximity_weight: float = 0.0,
 ) -> Tuple[MachinePoint, ...]:
     _assert_in_workspace(start, workspace, "path start")
     _assert_in_workspace(goal, workspace, "path goal")
@@ -173,7 +174,22 @@ def astar_path(
                 current, target, filtered, settings.obstacle_keepout_mm
             ):
                 continue
-            yield nxt, _distance(current, target)
+            step_distance = _distance(current, target)
+            clearance = min(
+                (
+                    _point_segment_distance(obstacle, current, target)
+                    for obstacle in filtered
+                ),
+                default=float("inf"),
+            )
+            proximity_cost = 0.0
+            if proximity_weight > 0 and clearance != float("inf"):
+                proximity_cost = (
+                    proximity_weight
+                    * step_distance
+                    / max(clearance, settings.obstacle_keepout_mm)
+                )
+            yield nxt, step_distance + proximity_cost
 
     frontier: List[Tuple[float, int, Tuple[int, int]]] = []
     sequence = 0
@@ -233,3 +249,46 @@ def plan_path(
     if settings.kind == "astar":
         return astar_path(start, goal, obstacles, workspace, settings)
     raise PlanningError(f"unsupported planner kind {settings.kind!r}")
+
+
+def safest_path_to_any_goal(
+    start: MachinePoint,
+    goals: Sequence[MachinePoint],
+    obstacles: Sequence[MachinePoint],
+    workspace: Workspace,
+    settings: PlannerSettings,
+) -> Tuple[MachinePoint, ...]:
+    if not goals:
+        raise PlanningError("capture ejection requires at least one goal")
+    candidates = []
+    errors = []
+    for index, goal in enumerate(goals):
+        try:
+            path = astar_path(
+                start,
+                goal,
+                obstacles,
+                workspace,
+                settings,
+                proximity_weight=settings.obstacle_keepout_mm,
+            )
+        except PlanningError as exc:
+            errors.append(f"chute {index}: {exc}")
+            continue
+        length = sum(_distance(a, b) for a, b in zip(path, path[1:]))
+        minimum_clearance = min(
+            (
+                _point_segment_distance(obstacle, a, b)
+                for a, b in zip(path, path[1:])
+                for obstacle in obstacles
+            ),
+            default=float("inf"),
+        )
+        candidates.append((-minimum_clearance, length, index, path))
+    if not candidates:
+        detail = " | ".join(errors)
+        raise PlanningError(
+            "no magnetically clear capture-ejection route was found"
+            + (f": {detail}" if detail else "")
+        )
+    return min(candidates)[3]
