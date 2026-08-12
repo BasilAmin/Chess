@@ -10,6 +10,7 @@ from .errors import ConfigurationError
 
 ALLOWED_LOCAL_KEYS = {
     "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
     "LICHESS_TOKEN",
     "CLERK_PUBLISHABLE_KEY",
     "CHESS_GANTRY_CAMERA_SOURCE",

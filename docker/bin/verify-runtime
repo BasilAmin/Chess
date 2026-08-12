@@ -30,6 +30,7 @@ REQUIRED = (
     "numpy",
     "cv2",
     "openai",
+    "anthropic",
     "pydantic",
     "chess_gantry.cli",
     "chess_gantry.clerk_auth",
@@ -42,6 +43,8 @@ REQUIRED = (
     "chess_gantry.upstash_persistence",
     "chess_gantry.vision",
     "chess_gantry.game_coordinator",
+    "chess_gantry.ai_arena",
+    "chess_gantry.openai_opponent",
     "chess_gantry.lichess_oauth",
     "chess_gantry.debug_console.server",
 )

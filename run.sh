@@ -230,6 +230,13 @@ else
   printf '==> WARNING: OPENAI_API_KEY is unset; camera preview works but Sol recognition cannot start\n'
 fi
 
+if [[ -n ${ANTHROPIC_API_KEY:-} ]]; then
+  RUN_ARGS+=(--env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+  printf '==> Anthropic Claude API key attached\n'
+else
+  printf '==> ANTHROPIC_API_KEY is unset; Claude vs ChatGPT arena is disabled\n'
+fi
+
 if [[ -n ${LICHESS_TOKEN:-} ]]; then
   RUN_ARGS+=(--env "LICHESS_TOKEN=$LICHESS_TOKEN")
   printf '==> Lichess Board API write token attached\n'

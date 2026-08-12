@@ -21,12 +21,14 @@ class EnvironmentTests(unittest.TestCase):
             path = Path(directory) / ".env.local"
             path.write_text(
                 "OPENAI_API_KEY='secret'\n"
+                "ANTHROPIC_API_KEY='claude-secret'\n"
                 "CHESS_GANTRY_CAMERA_SOURCE=snapshot:http://phone/shot.jpg\n"
             )
             os.chmod(path, 0o600)
             target = {}
             loaded = load_local_environment(path, target)
             self.assertEqual(target["OPENAI_API_KEY"], "secret")
+            self.assertEqual(target["ANTHROPIC_API_KEY"], "claude-secret")
             self.assertEqual(
                 target["CHESS_GANTRY_CAMERA_SOURCE"],
                 "snapshot:http://phone/shot.jpg",

@@ -8,7 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from .errors import ConfigurationError, ValidationError
 
 
-MODEL = "gpt-5.6-sol"
+OPENAI_MODEL = "gpt-5.6-sol"
+CLAUDE_MODEL = "claude-opus-4-1"
 
 
 class OpponentMove(BaseModel):
@@ -25,7 +26,7 @@ class SolChessOpponent:
         self,
         *,
         api_key: Optional[str] = None,
-        model: str = MODEL,
+        model: str = OPENAI_MODEL,
         client: Any = None,
     ) -> None:
         key = api_key or os.environ.get("OPENAI_API_KEY", "").strip()
@@ -95,5 +96,67 @@ class SolChessOpponent:
         if result.uci not in legal:
             raise ValidationError(
                 f"OpenAI returned {result.uci}, which is not in the server legal-move allowlist"
+            )
+        return result
+
+
+class ClaudeChessOpponent:
+    def __init__(
+        self,
+        *,
+        api_key: Optional[str] = None,
+        model: str = CLAUDE_MODEL,
+        client: Any = None,
+    ) -> None:
+        key = api_key or os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if client is None and not key:
+            raise ConfigurationError("ANTHROPIC_API_KEY is required for Claude games")
+        if client is None:
+            from anthropic import Anthropic
+
+            client = Anthropic(api_key=key, timeout=40.0, max_retries=1)
+        self.client = client
+        self.model = model
+
+    def choose_move(
+        self,
+        board: Any,
+        *,
+        style: Literal["balanced", "aggressive", "positional", "creative"] = "balanced",
+    ) -> OpponentMove:
+        legal = tuple(move.uci() for move in board.legal_moves)
+        if not legal:
+            raise ValidationError("Claude cannot move because the game is over")
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=350,
+            temperature=0,
+            system=(
+                "You are Claude playing one side of a chess game. Choose exactly one "
+                "move from the supplied legal UCI allowlist. Never return a move outside "
+                "the allowlist. Keep rationale and plan concise."
+            ),
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"FEN: {board.fen()}\nStyle: {style}\n"
+                        f"Legal UCI allowlist: {' '.join(legal)}"
+                    ),
+                }
+            ],
+            output_config={
+                "format": {
+                    "type": "json_schema",
+                    "schema": OpponentMove.model_json_schema(),
+                }
+            },
+        )
+        if not response.content or response.content[0].type != "text":
+            raise ValidationError("Claude did not return a chess move")
+        result = OpponentMove.model_validate_json(response.content[0].text)
+        if result.uci not in legal:
+            raise ValidationError(
+                f"Claude returned {result.uci}, which is not in the server legal-move allowlist"
             )
         return result
