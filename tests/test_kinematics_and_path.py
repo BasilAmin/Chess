@@ -8,6 +8,7 @@ from chess_gantry.kinematics import grid_to_machine
 from chess_gantry.models import GridPosition, MachinePoint
 from chess_gantry.path_planning import (
     astar_path,
+    path_minimum_clearance,
     safest_path_to_any_goal,
     segment_is_clear,
 )
@@ -123,15 +124,7 @@ class AStarTests(unittest.TestCase):
             self.settings(keepout=30.0),
         )
         self.assertGreater(len(path), 2)
-        minimum_clearance = min(
-            (
-                min(
-                    ((obstacle.x - point.x) ** 2 + (obstacle.y - point.y) ** 2) ** 0.5
-                    for point in (start, end)
-                )
-                for start, end in zip(path, path[1:])
-            )
-        )
+        minimum_clearance = path_minimum_clearance(path, (obstacle,))
         self.assertGreater(minimum_clearance, 30.0)
 
 

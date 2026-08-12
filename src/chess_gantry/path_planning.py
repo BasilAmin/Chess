@@ -44,6 +44,19 @@ def segment_is_clear(
     )
 
 
+def path_minimum_clearance(
+    path: Sequence[MachinePoint], obstacles: Sequence[MachinePoint]
+) -> float:
+    return min(
+        (
+            _point_segment_distance(obstacle, start, end)
+            for start, end in zip(path, path[1:])
+            for obstacle in obstacles
+        ),
+        default=float("inf"),
+    )
+
+
 def _assert_in_workspace(point: MachinePoint, workspace: Workspace, name: str) -> None:
     if not workspace.contains(point):
         raise PlanningError(
@@ -187,19 +200,15 @@ def astar_path(
             yield nxt, step_distance, clearance
 
     if maximize_clearance:
-        frontier_widest: List[Tuple[float, float, int, Tuple[int, int]]] = []
+        frontier_widest: List[Tuple[float, int, Tuple[int, int]]] = []
         sequence = 0
-        heappush(frontier_widest, (-float("inf"), 0.0, sequence, start_node))
-        came_from: Dict[Tuple[int, int], Tuple[int, int]] = {}
+        heappush(frontier_widest, (-float("inf"), sequence, start_node))
         clearance: Dict[Tuple[int, int], float] = {start_node: float("inf")}
-        distance: Dict[Tuple[int, int], float] = {start_node: 0.0}
         expanded = 0
         while frontier_widest:
-            negative_clearance, current_distance, _, current = heappop(frontier_widest)
+            negative_clearance, _, current = heappop(frontier_widest)
             current_clearance = -negative_clearance
             if current_clearance + _EPSILON < clearance.get(current, 0.0):
-                continue
-            if current_distance > distance.get(current, float("inf")) + _EPSILON:
                 continue
             expanded += 1
             if expanded > settings.max_expanded_nodes:
@@ -209,28 +218,54 @@ def astar_path(
                 )
             if current == goal_node:
                 break
-            for nxt, step_distance, edge_clearance in neighbours(current):
+            for nxt, _, edge_clearance in neighbours(current):
                 candidate_clearance = min(current_clearance, edge_clearance)
-                candidate_distance = current_distance + step_distance
                 previous_clearance = clearance.get(nxt, -1.0)
-                previous_distance = distance.get(nxt, float("inf"))
-                if candidate_clearance > previous_clearance + _EPSILON or (
-                    abs(candidate_clearance - previous_clearance) <= _EPSILON
-                    and candidate_distance + _EPSILON < previous_distance
-                ):
+                if candidate_clearance > previous_clearance + _EPSILON:
                     clearance[nxt] = candidate_clearance
-                    distance[nxt] = candidate_distance
-                    came_from[nxt] = current
                     sequence += 1
                     heappush(
                         frontier_widest,
-                        (-candidate_clearance, candidate_distance, sequence, nxt),
+                        (-candidate_clearance, sequence, nxt),
                     )
         else:
             raise PlanningError(
                 "no collision-free path was found. Check board state, workspace margin, "
                 "grid_step_mm, and obstacle_keepout_mm"
             )
+        goal_clearance = clearance[goal_node]
+        frontier_shortest: List[Tuple[float, int, Tuple[int, int]]] = []
+        sequence = 0
+        heappush(frontier_shortest, (0.0, sequence, start_node))
+        came_from: Dict[Tuple[int, int], Tuple[int, int]] = {}
+        distance: Dict[Tuple[int, int], float] = {start_node: 0.0}
+        closed: Set[Tuple[int, int]] = set()
+        while frontier_shortest:
+            current_distance, _, current = heappop(frontier_shortest)
+            if current in closed:
+                continue
+            closed.add(current)
+            if len(closed) > settings.max_expanded_nodes:
+                raise PlanningError(
+                    f"path search exceeded {settings.max_expanded_nodes} expanded nodes; "
+                    "increase grid_step_mm or max_expanded_nodes"
+                )
+            if current == goal_node:
+                break
+            for nxt, step_distance, edge_clearance in neighbours(current):
+                if edge_clearance + _EPSILON < goal_clearance:
+                    continue
+                candidate_distance = current_distance + step_distance
+                if candidate_distance + _EPSILON < distance.get(nxt, float("inf")):
+                    distance[nxt] = candidate_distance
+                    came_from[nxt] = current
+                    sequence += 1
+                    heappush(
+                        frontier_shortest,
+                        (candidate_distance, sequence, nxt),
+                    )
+        else:
+            raise PlanningError("planner failed to find shortest widest path")
         nodes = [goal_node]
         while nodes[-1] != start_node:
             parent = came_from.get(nodes[-1])
@@ -240,7 +275,7 @@ def astar_path(
         nodes.reverse()
         path = tuple(point(node) for node in nodes)
         if settings.simplify_path:
-            path = _simplify(path, filtered, clearance[goal_node])
+            path = _simplify(path, filtered, goal_clearance)
         return path
 
     frontier: List[Tuple[float, int, Tuple[int, int]]] = []
@@ -334,14 +369,7 @@ def safest_path_to_any_goal(
             errors.append(f"chute {index}: {exc}")
             continue
         length = sum(_distance(a, b) for a, b in zip(path, path[1:]))
-        minimum_clearance = min(
-            (
-                _point_segment_distance(obstacle, a, b)
-                for a, b in zip(path, path[1:])
-                for obstacle in obstacles
-            ),
-            default=float("inf"),
-        )
+        minimum_clearance = path_minimum_clearance(path, obstacles)
         if minimum_clearance + _EPSILON < settings.obstacle_keepout_mm:
             errors.append(f"chute {index}: path violates magnetic keepout")
             continue
