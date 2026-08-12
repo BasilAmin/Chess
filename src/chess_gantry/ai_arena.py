@@ -74,7 +74,9 @@ class AIArena:
         import chess
 
         if {white, black} != {"chatgpt", "claude"}:
-            raise ValidationError("AI arena requires one ChatGPT side and one Claude side")
+            raise ValidationError(
+                "AI arena requires one ChatGPT side and one Claude side"
+            )
         if style not in {"balanced", "aggressive", "positional", "creative"}:
             raise ValidationError("AI arena style is invalid")
         if not 0 <= delay_s <= 30:
@@ -115,7 +117,11 @@ class AIArena:
             while not self._stop.is_set():
                 with self._lock:
                     board = self._board
-                    if board is None or board.is_game_over() or board.ply() >= self._max_plies:
+                    if (
+                        board is None
+                        or board.is_game_over()
+                        or board.ply() >= self._max_plies
+                    ):
                         self._state = "finished"
                         return
                     actor = self._white if board.turn else self._black
@@ -142,7 +148,9 @@ class AIArena:
                                 ),
                             }
                             self._state = "waiting_manual"
-                        while not self._stop.is_set() and not self._manual_event.wait(0.2):
+                        while not self._stop.is_set() and not self._manual_event.wait(
+                            0.2
+                        ):
                             pass
                         if self._stop.is_set():
                             return
@@ -258,9 +266,11 @@ class AIArena:
             if board is not None:
                 rows = [
                     "".join(
-                        board.piece_at(chess.square(file_index, rank)).symbol()
-                        if board.piece_at(chess.square(file_index, rank))
-                        else "."
+                        (
+                            board.piece_at(chess.square(file_index, rank)).symbol()
+                            if board.piece_at(chess.square(file_index, rank))
+                            else "."
+                        )
                         for file_index in range(8)
                     )
                     for rank in range(7, -1, -1)
