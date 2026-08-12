@@ -101,6 +101,39 @@ class AStarTests(unittest.TestCase):
                 self.settings(keepout=30.0),
             )
 
+    def test_capture_route_rejects_piece_on_chute_endpoint(self) -> None:
+        workspace = Workspace(0.0, 100.0, 0.0, 100.0)
+        with self.assertRaisesRegex(PlanningError, "endpoint violates"):
+            safest_path_to_any_goal(
+                MachinePoint(100.0, 50.0),
+                (MachinePoint(0.0, 50.0),),
+                (MachinePoint(0.0, 50.0),),
+                workspace,
+                self.settings(keepout=30.0),
+            )
+
+    def test_capture_route_maximizes_bottleneck_clearance_before_distance(self) -> None:
+        workspace = Workspace(0.0, 100.0, 0.0, 100.0)
+        obstacle = MachinePoint(50.0, 30.0)
+        path = safest_path_to_any_goal(
+            MachinePoint(100.0, 0.0),
+            (MachinePoint(0.0, 0.0),),
+            (obstacle,),
+            workspace,
+            self.settings(keepout=30.0),
+        )
+        self.assertGreater(len(path), 2)
+        minimum_clearance = min(
+            (
+                min(
+                    ((obstacle.x - point.x) ** 2 + (obstacle.y - point.y) ** 2) ** 0.5
+                    for point in (start, end)
+                )
+                for start, end in zip(path, path[1:])
+            )
+        )
+        self.assertGreater(minimum_clearance, 30.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -558,6 +558,44 @@ class ServiceTests(unittest.TestCase):
                 GridPosition(3, 4),
             )
 
+    def test_implicit_capture_uses_independently_committed_ejection(self) -> None:
+        with TemporaryDirectory() as directory:
+            temp = Path(directory)
+            state_path, journal_path, audit_path = self.paths(temp)
+            atomic_write_json(state_path, self.capture_state().to_dict())
+            service = GantryService(
+                test_config(capture=True, eject=True),
+                state_path,
+                journal_path,
+                audit_path,
+            )
+            move = MoveDelta.from_mapping(
+                {
+                    "position": "white_pawn_e",
+                    "px": 4,
+                    "py": 3,
+                    "nx": 3,
+                    "ny": 4,
+                }
+            )
+
+            class FailSecondProgram(FakeLink):
+                def send_program(self, commands):
+                    commands = tuple(commands)
+                    self.programs.append(commands)
+                    if len(self.programs) == 2:
+                        raise SerialProtocolError("attacker transfer interrupted")
+                    return ()
+
+            with self.assertRaisesRegex(SerialProtocolError, "attacker transfer"):
+                service.execute_with_link(move, FailSecondProgram())
+            persisted = service.store.load()
+            self.assertEqual(persisted.pieces["black_pawn_d"].status, "captured")
+            self.assertEqual(
+                persisted.pieces["white_pawn_e"].board_position,
+                GridPosition(4, 3),
+            )
+
     def test_castling_buffer_plans_out_and_back_with_persisted_state(self) -> None:
         with TemporaryDirectory() as directory:
             temp = Path(directory)

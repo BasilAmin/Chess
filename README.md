@@ -408,8 +408,8 @@ clear X10 castling buffers. It then:
 - rejects games that already contain moves;
 - opens one persistent Marlin connection;
 - homes once;
-- permits Marlin acknowledgement waits up to five minutes so long-running games
-  and compound physical moves do not fail at the previous two-minute ceiling;
+- permits each Marlin acknowledgement wait, including a blocking `M400`, up to
+  five minutes instead of the previous two-minute per-command ceiling;
 - renders an ASCII terminal board and status;
 - validates every streamed UCI move with `python-chess`;
 - verifies the remote move list still starts with the exact committed prefix;

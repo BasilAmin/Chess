@@ -510,15 +510,21 @@ class GantryService:
                 "cannot execute: the supplied Marlin link is not connected"
             )
         state = self.store.load()
-        if self.config.capture.mode == "eject" and move.capture is not None:
-            captured = state.pieces.get(move.capture.piece_id)
-            if (
-                captured is not None
-                and captured.status == "captured"
-                and state.piece_at(move.capture.position) is None
-            ):
-                move = replace(move, capture=None)
-            elif state.validate_move(move) is not None:
+        captured = None
+        if self.config.capture.mode == "eject":
+            if move.capture is not None:
+                specified = state.pieces.get(move.capture.piece_id)
+                if (
+                    specified is not None
+                    and specified.status == "captured"
+                    and state.piece_at(move.capture.position) is None
+                ):
+                    move = replace(move, capture=None)
+                else:
+                    captured = state.validate_move(move)
+            else:
+                captured = state.validate_move(move)
+            if captured is not None:
                 ejection = self.plan_capture_ejection(move, state)
                 self.execute_plan_with_link(ejection, link)
                 move = replace(move, capture=None)
