@@ -46,6 +46,7 @@ REQUIRED = (
     "chess_gantry.ai_arena",
     "chess_gantry.openai_opponent",
     "chess_gantry.local_vision",
+    "chess_gantry.lichess_mirror",
     "chess_gantry.lichess_oauth",
     "chess_gantry.debug_console.server",
 )

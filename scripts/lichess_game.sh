@@ -49,14 +49,7 @@ case "$ACTION" in
       --interval 2
     ;;
   play)
-    initialize
-    uv run chess-gantry --config config.json home-gantry \
-      --record "$GAME_DIR/gantry_home.json" \
-      --confirm-motion --confirm-clear-path
-    "${base[@]}" lichess-follow "$GAME_ID" \
-      --output-dir "$GAME_DIR/physical" \
-      --session "$GAME_DIR/physical.session.json" \
-      --interval 2 --execute --confirm-motion
+    exec ./scripts/mirror_lichess.sh "$GAME_ID"
     ;;
   reset)
     initialize

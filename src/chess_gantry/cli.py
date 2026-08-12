@@ -180,6 +180,55 @@ def _parser() -> ArgumentParser:
         type=float,
         help="dry-run-only A* clearance override; does not modify config.json",
     )
+    mirror = commands.add_parser(
+        "lichess-mirror",
+        help="mirror a fresh Lichess game in a terminal with no vision",
+    )
+    mirror.add_argument("game_id", help="fresh standard Lichess game ID")
+    mirror.add_argument(
+        "--execute",
+        action="store_true",
+        help="home once and physically execute each new Lichess move",
+    )
+    mirror.add_argument("--demo", action="store_true", help="use simulated Marlin")
+    mirror.add_argument("--once", action="store_true", help="sync once and exit")
+    mirror.add_argument(
+        "--configured-speed",
+        action="store_true",
+        help="use config motion feeds instead of fast 12000/3000 mm/min profile",
+    )
+    mirror.add_argument(
+        "--confirm-motion",
+        action="store_true",
+        help="required for physical execution",
+    )
+    mirror.add_argument(
+        "--confirm-standard-position",
+        action="store_true",
+        help="required confirmation that the physical board is at the standard position",
+    )
+    mirror.add_argument(
+        "--confirm-clear-path",
+        action="store_true",
+        help="required confirmation that homing and board paths are clear",
+    )
+    mirror.add_argument(
+        "--confirm-high-speed",
+        action="store_true",
+        help="required for the fast 12000/3000 mm/min profile",
+    )
+    mirror.add_argument("--unicode", action="store_true", help="render Unicode pieces")
+    mirror.add_argument(
+        "--no-screen",
+        action="store_true",
+        help="append terminal updates instead of clearing the screen",
+    )
+    mirror.add_argument(
+        "--stream-mode",
+        choices=("auto", "public", "board"),
+        default="public",
+        help="public mirrors any public game; board requires a participant token",
+    )
     commands.add_parser("ports", help="list ranked serial ports visible to pyserial")
 
     diagnose = commands.add_parser(
@@ -709,6 +758,7 @@ _COMMANDS = frozenset(
         "uci-to-json",
         "lichess-pgn",
         "lichess-follow",
+        "lichess-mirror",
         "ports",
         "diagnose",
         "endstop-watch",
@@ -1043,6 +1093,41 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                 reset_session=args.reset_session,
                 once=args.once,
             )
+            return 0
+
+        if args.command == "lichess-mirror":
+            from .lichess_mirror import LichessMirror, MirrorTerminal
+
+            if args.execute and not args.demo:
+                if not args.confirm_motion:
+                    parser.error("physical lichess-mirror requires --confirm-motion")
+                if not args.confirm_standard_position:
+                    parser.error(
+                        "physical lichess-mirror requires --confirm-standard-position"
+                    )
+                if not args.confirm_clear_path:
+                    parser.error(
+                        "physical lichess-mirror requires --confirm-clear-path"
+                    )
+            if (
+                not args.configured_speed
+                and args.execute
+                and not args.confirm_high_speed
+            ):
+                parser.error("fast lichess-mirror requires --confirm-high-speed")
+            mirror_session = LichessMirror(
+                game_id=args.game_id,
+                config=config,
+                root=Path.cwd(),
+                execute=args.execute,
+                demo=args.demo,
+                fast=not args.configured_speed,
+                stream_mode=args.stream_mode,
+                terminal=MirrorTerminal(
+                    screen=not args.no_screen, unicode=args.unicode
+                ),
+            )
+            mirror_session.run(once=args.once)
             return 0
 
         if args.command == "reconcile":

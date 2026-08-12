@@ -392,6 +392,85 @@ emergency stop remains available throughout setup.
 
 ## Game Modes
 
+### Terminal Lichess Mirror, No Vision
+
+For a fresh public Lichess game with zero moves:
+
+```bash
+./scripts/mirror_lichess.sh GAME_ID
+```
+
+The script asks for:
+
+```text
+MIRROR BOARD READY
+```
+
+It then:
+
+- initializes isolated state under `data/lichess-mirror/GAME_ID/physical/`;
+- rejects games that already contain moves;
+- opens one persistent Marlin connection;
+- homes once;
+- renders an ASCII terminal board and status;
+- validates every streamed UCI move with `python-chess`;
+- verifies the remote move list still starts with the exact committed prefix;
+- executes one physical ply at a time;
+- persists FEN, UCI history, physical revision, and compound-ply progress;
+- reconnects with bounded exponential backoff;
+- prevents replay after restart;
+- forces the magnet off and restores software endstops on exit.
+
+The default fast profile is:
+
+```text
+travel: 12000 mm/min
+drag:    3000 mm/min
+parking: disabled between moves
+```
+
+Use calibrated configured feeds instead:
+
+```bash
+./scripts/mirror_lichess.sh GAME_ID --configured-speed
+```
+
+Simulate the complete terminal mirror without hardware:
+
+```bash
+./scripts/mirror_lichess.sh GAME_ID --demo --once --no-screen
+```
+
+Inspect physical mirror state:
+
+```bash
+./scripts/mirror_lichess.sh status GAME_ID
+```
+
+Inspect or reconcile an uncertain physical move:
+
+```bash
+./scripts/mirror_lichess.sh reconcile GAME_ID
+
+./scripts/mirror_lichess.sh reconcile GAME_ID \
+  --mark-applied --confirm-physical-state
+
+./scripts/mirror_lichess.sh reconcile GAME_ID \
+  --discard --confirm-physical-state
+```
+
+By default the command uses Lichess's public game stream. Public spectator
+streams may be delayed by Lichess anti-cheating policy. For an account-owned
+Board API game with an authorized `LICHESS_TOKEN`, use:
+
+```bash
+./scripts/mirror_lichess.sh GAME_ID --stream-mode board
+```
+
+Captures stop safely while physical capture storage is disabled. Promotions
+stop for verified piece replacement. Castling executes king and rook as ordered
+sub-transfers and advances the ply cursor only after both complete.
+
 ### Physical Claude Vs ChatGPT
 
 Add both provider keys to the ignored `.env.local` file:

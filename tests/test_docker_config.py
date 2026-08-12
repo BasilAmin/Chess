@@ -45,7 +45,11 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertIn("this image is distroless and ships no shell", entrypoint)
 
     def test_pi_scripts_exist_and_are_executable(self) -> None:
-        for path in (ROOT / "scripts" / "install_pi.sh", ROOT / "run.sh"):
+        for path in (
+            ROOT / "scripts" / "install_pi.sh",
+            ROOT / "scripts" / "mirror_lichess.sh",
+            ROOT / "run.sh",
+        ):
             self.assertTrue(path.exists())
             self.assertTrue(path.stat().st_mode & 0o111)
 
@@ -92,6 +96,7 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertIn('"openai"', verifier)
         self.assertIn('"anthropic"', verifier)
         self.assertIn('"chess_gantry.local_vision"', verifier)
+        self.assertIn('"chess_gantry.lichess_mirror"', verifier)
 
     def test_run_script_supports_network_and_v4l2_cameras(self) -> None:
         script = (ROOT / "run.sh").read_text(encoding="utf-8")

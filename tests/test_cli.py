@@ -92,6 +92,27 @@ class RunCommandTests(unittest.TestCase):
         self.assertNotIn("vision-markers", help_text)
         self.assertIn("vision-test", help_text)
 
+    def test_lichess_mirror_parser_exposes_safe_terminal_options(self) -> None:
+        from chess_gantry.cli import _parser
+
+        args = _parser().parse_args(
+            [
+                "lichess-mirror",
+                "game1234",
+                "--execute",
+                "--demo",
+                "--confirm-high-speed",
+                "--unicode",
+                "--no-screen",
+            ]
+        )
+        self.assertEqual(args.game_id, "game1234")
+        self.assertTrue(args.execute)
+        self.assertTrue(args.demo)
+        self.assertTrue(args.confirm_high_speed)
+        self.assertTrue(args.unicode)
+        self.assertTrue(args.no_screen)
+
     def test_web_defaults_to_unauthenticated_loopback(self) -> None:
         from chess_gantry.cli import _parser
 
