@@ -139,6 +139,8 @@ class GantryService:
                 assert position is not None
                 points.append(grid_to_machine(position, self.config.board))
             elif piece.capture_slot is not None:
+                if not self.config.capture.enabled:
+                    continue
                 if piece.capture_slot >= len(self.config.capture.slots):
                     raise StateError(
                         f"piece {piece.piece_id!r} uses capture slot {piece.capture_slot}, but only "

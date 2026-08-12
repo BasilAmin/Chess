@@ -320,6 +320,43 @@ emergency stop remains available throughout setup.
 
 ## Game Modes
 
+### Physical Claude Vs ChatGPT
+
+Add both provider keys to the ignored `.env.local` file:
+
+```text
+OPENAI_API_KEY='your_openai_key'
+ANTHROPIC_API_KEY='your_anthropic_key'
+CHESS_GANTRY_CAMERA_SOURCE='browser:http://192.168.100.88:8080'
+```
+
+Then:
+
+```bash
+chmod 600 .env.local
+```
+
+Restart the dashboard and open **Claude vs ChatGPT**:
+
+1. Confirm ChatGPT and Claude both show `Ready`.
+2. Choose which provider controls White.
+3. Choose style, move delay, and maximum plies.
+4. Keep **Execute normal moves physically** selected.
+5. Press **Start Claude vs ChatGPT**.
+
+The arena homes once, keeps one persistent Marlin connection, asks each provider
+for a move from a server-generated legal UCI allowlist, validates it, and
+executes normal moves physically. The board, SAN score, provider, rationale,
+plan, latency, FEN, check state, and result update live.
+
+Captures and promotions pause for operator assistance because automatic capture
+storage and promotion replacement are not calibrated. Perform the requested
+physical move, type `AI MOVE COMPLETED`, and press **Confirm physical move**.
+The persistent physical state is committed before either provider continues.
+
+Claude requires `ANTHROPIC_API_KEY`; the OpenAI key cannot authenticate to
+Anthropic. Without it, the GUI displays the missing provider and disables Start.
+
 ### Two People On One Board
 
 Select:
@@ -336,10 +373,15 @@ Human captures are supported when the player removes the captured piece.
 
 1. Use **Connect Lichess** and approve `board:play`.
 2. Create a fresh Lichess Board API game with zero moves.
-3. Put the physical board in the standard position.
-4. Select **Camera player vs Lichess / AI**.
-5. Enter the game ID and select the camera-controlled side.
+3. Enter the game ID and press **Validate game**. The server verifies scope,
+   account participation, game access, zero moves, and unfinished status.
+4. Put the physical board in the standard position.
+5. Select **Camera player vs Lichess / AI**.
 6. Start before the first move.
+
+Camera moves are written with `client.board.make_move(game_id, uci)`. Opponent
+moves arrive through the authenticated Board API stream. The local Lichess echo
+is suppressed so the gantry never repeats a move already made physically.
 
 Flow:
 

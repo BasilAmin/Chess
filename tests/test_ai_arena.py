@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import time
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import json
 
 from chess_gantry.ai_arena import AIArena
 from chess_gantry.errors import ConfigurationError, ValidationError
@@ -19,6 +22,19 @@ class FakeProvider:
             uci=move.uci(),
             rationale="A legal move.",
             plan="Continue development.",
+        )
+
+
+class SequenceProvider:
+    def __init__(self, moves):
+        self.moves = list(moves)
+
+    def choose_move(self, board, *, style="balanced"):
+        move = self.moves.pop(0)
+        return OpponentMove(
+            uci=move,
+            rationale="Sequence move.",
+            plan="Continue.",
         )
 
 
@@ -70,6 +86,74 @@ class AIArenaTests(unittest.TestCase):
             self.arena.start()
         status = self.arena.stop()
         self.assertIn(status["state"], {"stopped", "finished"})
+
+    def test_physical_demo_executes_normal_moves_and_tracks_state(self):
+        from chess_gantry.config import AppConfig
+
+        with TemporaryDirectory() as directory:
+            config = AppConfig.from_mapping(
+                json.loads(
+                    (
+                        Path(__file__).resolve().parents[1] / "config.demo.json"
+                    ).read_text()
+                )
+            )
+            arena = AIArena(
+                SequenceProvider(["e2e4"]),
+                SequenceProvider(["e7e5"]),
+                config=config,
+                root=Path(directory),
+                demo=True,
+            )
+            arena.start(delay_s=0, max_plies=2, physical=True)
+            deadline = time.monotonic() + 4
+            while arena.running() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            status = arena.status()
+            self.assertEqual(status["state"], "finished")
+            self.assertEqual(status["ply"], 2)
+            self.assertTrue(status["physical"])
+            state = arena._service.store.load()
+            self.assertEqual(state.pieces["white_pawn_e"].y, 3)
+            self.assertEqual(state.pieces["black_pawn_e"].y, 4)
+
+    def test_physical_capture_pauses_for_manual_confirmation_then_commits(self):
+        from chess_gantry.config import AppConfig
+
+        with TemporaryDirectory() as directory:
+            config = AppConfig.from_mapping(
+                json.loads(
+                    (
+                        Path(__file__).resolve().parents[1] / "config.demo.json"
+                    ).read_text()
+                )
+            )
+            arena = AIArena(
+                SequenceProvider(["e2e4", "e4d5"]),
+                SequenceProvider(["d7d5"]),
+                config=config,
+                root=Path(directory),
+                demo=True,
+            )
+            arena.start(delay_s=0, max_plies=3, physical=True)
+            deadline = time.monotonic() + 4
+            while (
+                arena.status()["state"] != "waiting_manual"
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            pending = arena.status()["manual_action"]
+            self.assertEqual(pending["uci"], "e4d5")
+            self.assertTrue(pending["capture"])
+            arena.confirm_manual_action()
+            deadline = time.monotonic() + 4
+            while arena.running() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(arena.status()["state"], "finished")
+            state = arena._service.store.load()
+            self.assertEqual(state.pieces["white_pawn_e"].x, 3)
+            self.assertEqual(state.pieces["white_pawn_e"].y, 4)
+            self.assertEqual(state.pieces["black_pawn_d"].status, "captured")
 
 
 if __name__ == "__main__":

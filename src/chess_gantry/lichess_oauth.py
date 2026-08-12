@@ -136,6 +136,70 @@ class LichessOAuth:
             self._scopes = ()
             self._expires_at = None
 
+    def validate_game(self, game_id: str) -> dict[str, Any]:
+        if (
+            not isinstance(game_id, str)
+            or not game_id.isalnum()
+            or not 8 <= len(game_id) <= 12
+        ):
+            raise ValidationError("Lichess game ID must be 8-12 letters or digits")
+        token = self.token(optional=False)
+        if self._account is None:
+            self.validate()
+        response = self._client().get(
+            f"https://lichess.org/game/export/{game_id}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/x-chess-pgn",
+            },
+            params={"moves": "true", "clocks": "false", "evals": "false"},
+        )
+        if response.status_code != 200:
+            raise ConfigurationError(
+                f"Lichess game {game_id} is not accessible with this account (HTTP {response.status_code})"
+            )
+        import chess.pgn
+        from io import StringIO
+
+        game = chess.pgn.read_game(StringIO(response.text))
+        if game is None:
+            raise ValidationError("Lichess returned unreadable game PGN")
+        username = str(
+            (self._account or {}).get("username")
+            or (self._account or {}).get("id")
+            or ""
+        ).casefold()
+        white = str(game.headers.get("White", ""))
+        black = str(game.headers.get("Black", ""))
+        if username == white.casefold():
+            local_color, opponent = "white", black
+        elif username == black.casefold():
+            local_color, opponent = "black", white
+        else:
+            raise ConfigurationError(
+                f"connected account is not a player in Lichess game {game_id}"
+            )
+        moves = tuple(game.mainline_moves())
+        if moves:
+            raise ConfigurationError(
+                f"Lichess game {game_id} already contains {len(moves)} move(s); create a fresh zero-move game"
+            )
+        result = game.headers.get("Result", "*")
+        if result != "*":
+            raise ConfigurationError(
+                f"Lichess game {game_id} is already finished ({result})"
+            )
+        return {
+            "ready": True,
+            "game_id": game_id,
+            "local_color": local_color,
+            "opponent": opponent,
+            "white": white,
+            "black": black,
+            "moves": 0,
+            "result": result,
+        }
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             return {

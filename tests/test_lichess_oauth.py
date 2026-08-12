@@ -9,8 +9,12 @@ from chess_gantry.lichess_oauth import LichessOAuth
 
 
 class FakeHTTP:
-    def __init__(self, *, scopes="board:play"):
+    def __init__(self, *, scopes="board:play", pgn=None):
         self.scopes = scopes
+        self.pgn = pgn or (
+            '[Event "Casual Game"]\n[White "Player"]\n[Black "Opponent"]\n'
+            '[Result "*"]\n\n*\n'
+        )
         self.calls = []
 
     def post(self, url, **kwargs):
@@ -37,6 +41,8 @@ class FakeHTTP:
 
     def get(self, url, **kwargs):
         self.calls.append(("GET", url, kwargs))
+        if "/game/export/" in url:
+            return SimpleNamespace(status_code=200, text=self.pgn)
         return SimpleNamespace(
             status_code=200,
             json=lambda: {"id": "player", "username": "Player"},
@@ -96,6 +102,32 @@ class LichessOAuthTests(unittest.TestCase):
         oauth.disconnect()
         self.assertFalse(oauth.status()["connected"])
         self.assertIsNone(oauth.token())
+
+    def connected_oauth(self, http):
+        oauth = LichessOAuth(http=http)
+        url = oauth.begin("http://localhost:8000/auth/lichess/callback")
+        state = parse_qs(urlsplit(url).query)["state"][0]
+        oauth.complete(code="code", state=state)
+        return oauth
+
+    def test_game_validation_confirms_player_and_zero_move_state(self):
+        oauth = self.connected_oauth(FakeHTTP())
+        result = oauth.validate_game("game1234")
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["local_color"], "white")
+        self.assertEqual(result["opponent"], "Opponent")
+
+    def test_game_validation_rejects_non_player(self):
+        pgn = '[White "Someone"]\n[Black "Other"]\n[Result "*"]\n\n*\n'
+        oauth = self.connected_oauth(FakeHTTP(pgn=pgn))
+        with self.assertRaisesRegex(ConfigurationError, "not a player"):
+            oauth.validate_game("game1234")
+
+    def test_game_validation_rejects_existing_moves(self):
+        pgn = '[White "Player"]\n[Black "Opponent"]\n[Result "*"]\n\n' "1. e4 e5 *\n"
+        oauth = self.connected_oauth(FakeHTTP(pgn=pgn))
+        with self.assertRaisesRegex(ConfigurationError, "already contains"):
+            oauth.validate_game("game1234")
 
 
 if __name__ == "__main__":

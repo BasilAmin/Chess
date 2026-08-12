@@ -47,12 +47,13 @@ def chess_move_deltas(
     move: Any,
     state: BoardState,
     event_id: str,
+    allow_promotion_replacement: bool = False,
 ) -> tuple[MoveDelta, ...]:
     import chess
 
     if move not in board.legal_moves:
         raise ValidationError(f"move {move.uci()} is illegal in the current position")
-    if move.promotion is not None:
+    if move.promotion is not None and not allow_promotion_replacement:
         raise ValidationError("promotion requires verified physical piece replacement")
     rank = chess.square_rank(move.from_square)
     if board.is_castling(move):

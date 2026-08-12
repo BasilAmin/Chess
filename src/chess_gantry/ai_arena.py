@@ -44,6 +44,7 @@ class AIArena:
         self._service: Optional[GantryService] = None
         self._manual_action: Optional[dict[str, Any]] = None
         self._manual_event = threading.Event()
+        self._pending_move: Any = None
         self._serial_port: Optional[str] = None
         self._serial_baudrate: Optional[int] = None
 
@@ -77,6 +78,10 @@ class AIArena:
             raise ValidationError(
                 "AI arena requires one ChatGPT side and one Claude side"
             )
+        if self.chatgpt is None:
+            raise ConfigurationError("OPENAI_API_KEY is required for ChatGPT")
+        if self.claude is None:
+            raise ConfigurationError("ANTHROPIC_API_KEY is required for Claude")
         if style not in {"balanced", "aggressive", "positional", "creative"}:
             raise ValidationError("AI arena style is invalid")
         if not 0 <= delay_s <= 30:
@@ -102,6 +107,7 @@ class AIArena:
             self._started_at = time.time()
             self._physical = physical
             self._manual_action = None
+            self._pending_move = None
             self._manual_event.clear()
             self._serial_port = serial_port
             self._serial_baudrate = serial_baudrate
@@ -147,6 +153,7 @@ class AIArena:
                                     "captured-piece removal or promotion replacement, then confirm."
                                 ),
                             }
+                            self._pending_move = move
                             self._state = "waiting_manual"
                         while not self._stop.is_set() and not self._manual_event.wait(
                             0.2
@@ -155,14 +162,16 @@ class AIArena:
                         if self._stop.is_set():
                             return
                         self._manual_event.clear()
+                        self._commit_manual_physical(board, move, actor)
                         with self._lock:
                             self._manual_action = None
+                            self._pending_move = None
                     else:
                         with self._lock:
                             self._state = "executing"
                         self._execute_physical(board, move, actor)
-                board.push(move)
                 with self._lock:
+                    board.push(move)
                     self._history.append(
                         {
                             "ply": board.ply(),
@@ -193,6 +202,11 @@ class AIArena:
         from dataclasses import replace
 
         assert self.config is not None and self.root is not None
+        global_pending = self.root / "data" / "pending_move.json"
+        if global_pending.exists():
+            raise ConfigurationError(
+                f"pending physical transaction at {global_pending}; reconcile it first"
+            )
         path = self.root / "data" / "games" / "ai-arena"
         path.mkdir(parents=True, exist_ok=True)
         self._service = GantryService(
@@ -235,6 +249,18 @@ class AIArena:
                 self._service.store.save(plan.next_state)
             else:
                 self._service.execute_with_link(delta, self._link)
+
+    def _commit_manual_physical(self, board: Any, move: Any, actor: str) -> None:
+        assert self._service is not None
+        event = f"ai-arena.{board.ply() + 1}.{actor}.manual"
+        deltas = chess_move_deltas(
+            board,
+            move,
+            self._service.store.load(),
+            event,
+            allow_promotion_replacement=True,
+        )
+        self._service.commit_observed_moves(deltas)
 
     def confirm_manual_action(self) -> dict[str, Any]:
         with self._lock:

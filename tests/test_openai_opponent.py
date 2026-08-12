@@ -6,7 +6,11 @@ import unittest
 import chess
 
 from chess_gantry.errors import ValidationError
-from chess_gantry.openai_opponent import OpponentMove, SolChessOpponent
+from chess_gantry.openai_opponent import (
+    ClaudeChessOpponent,
+    OpponentMove,
+    SolChessOpponent,
+)
 
 
 class FakeResponses:
@@ -52,6 +56,41 @@ class OpenAIOpponentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "game is over"):
             opponent.choose_move(board)
         self.assertEqual(responses.calls, [])
+
+
+class FakeClaudeMessages:
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=self.payload)]
+        )
+
+
+class ClaudeOpponentTests(unittest.TestCase):
+    def test_claude_uses_json_schema_and_legal_allowlist(self):
+        messages = FakeClaudeMessages(
+            '{"uci":"e2e4","rationale":"Claims the center.","plan":"Develop."}'
+        )
+        opponent = ClaudeChessOpponent(client=SimpleNamespace(messages=messages))
+        result = opponent.choose_move(chess.Board(), style="creative")
+        self.assertEqual(result.uci, "e2e4")
+        call = messages.calls[0]
+        self.assertEqual(call["model"], "claude-opus-4-1")
+        self.assertEqual(call["output_config"]["format"]["type"], "json_schema")
+        self.assertIn("e2e4", call["messages"][0]["content"])
+        self.assertIn("Style: creative", call["messages"][0]["content"])
+
+    def test_claude_illegal_move_is_rejected(self):
+        messages = FakeClaudeMessages(
+            '{"uci":"e2e5","rationale":"Invalid.","plan":"Invalid."}'
+        )
+        opponent = ClaudeChessOpponent(client=SimpleNamespace(messages=messages))
+        with self.assertRaisesRegex(ValidationError, "allowlist"):
+            opponent.choose_move(chess.Board())
 
 
 if __name__ == "__main__":

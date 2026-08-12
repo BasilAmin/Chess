@@ -76,6 +76,7 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertIn("opencv-python-headless", project)
         self.assertIn("numpy", project)
         self.assertIn("openai", project)
+        self.assertIn("anthropic", project)
         self.assertIn("pydantic", project)
 
     def test_distroless_image_verifies_vision_runtime(self) -> None:
@@ -89,6 +90,7 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertNotIn("ArucoDetector", verifier)
         self.assertIn("FFMPEG", verifier)
         self.assertIn('"openai"', verifier)
+        self.assertIn('"anthropic"', verifier)
 
     def test_run_script_supports_network_and_v4l2_cameras(self) -> None:
         script = (ROOT / "run.sh").read_text(encoding="utf-8")

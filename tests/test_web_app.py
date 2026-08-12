@@ -172,8 +172,95 @@ class FakeOAuth:
             raise ValidationError("not connected")
         return self.status()
 
+    def validate_game(self, game_id):
+        if not self.connected:
+            raise ValidationError("not connected")
+        return {
+            "ready": True,
+            "game_id": game_id,
+            "local_color": "white",
+            "opponent": "Opponent",
+            "white": "test-user",
+            "black": "Opponent",
+            "moves": 0,
+            "result": "*",
+        }
+
     def disconnect(self):
         self.connected = False
+
+
+class FakeArena:
+    def __init__(self):
+        self.started = None
+        self.manual = None
+
+    def running(self):
+        return self.started is not None
+
+    def start(self, **kwargs):
+        self.started = kwargs
+        return self.status()
+
+    def stop(self):
+        self.started = None
+        return self.status()
+
+    def confirm_manual_action(self):
+        self.manual = None
+        return self.status()
+
+    def status(self):
+        return {
+            "state": "running" if self.started else "idle",
+            "error": None,
+            "white": "chatgpt",
+            "black": "claude",
+            "style": "balanced",
+            "delay_s": 1,
+            "max_plies": 200,
+            "fen": None,
+            "rows": None,
+            "turn": "white",
+            "history": [],
+            "ply": 0,
+            "legal_move_count": 0,
+            "in_check": False,
+            "game_over": False,
+            "result": None,
+            "physical": bool(self.started and self.started.get("physical")),
+            "manual_action": self.manual,
+        }
+
+
+class FakeCommissioning:
+    def __init__(self):
+        self.commissioned = True
+
+    def status(self):
+        return {
+            "commissioned": self.commissioned,
+            "reason": None if self.commissioned else "not_attested",
+        }
+
+    def attest(self, confirmation, git_commit="unknown"):
+        self.commissioned = True
+        return self.status()
+
+    def clear(self):
+        self.commissioned = False
+        return self.status()
+
+
+class FakeOpponent:
+    def choose_move(self, board, *, style="balanced"):
+        from chess_gantry.openai_opponent import OpponentMove
+
+        return OpponentMove(
+            uci="e2e4",
+            rationale=f"A {style} move.",
+            plan="Develop quickly.",
+        )
 
 
 class StubVerifier:
@@ -240,6 +327,9 @@ class WebAppTests(unittest.TestCase):
         self.server = GantryHTTPServer(("127.0.0.1", 0), RequestHandler)
         self.server.camera = FakeCamera()
         self.server.game = FakeGame()
+        self.server.ai_arena = FakeArena()
+        self.server.commissioning = FakeCommissioning()
+        self.server.openai_opponent = FakeOpponent()
         self.server.lichess_oauth = FakeOAuth()
         self.server.clerk_verifier = None
         self.server.dashboard_html = HTML
@@ -276,6 +366,11 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("Calibrate 4 corners", html)
         self.assertIn("Connect Lichess", html)
         self.assertIn("Scan ports", html)
+        self.assertIn("Claude vs ChatGPT", html)
+        self.assertIn("Mark commissioned", html)
+        self.assertIn("Start Claude vs ChatGPT", html)
+        self.assertIn('id="flipBoard"', html)
+        self.assertIn('id="moveHistory"', html)
         self.assertIn('id="phoneStream"', html)
         self.assertIn('id="cameraCanvas"', html)
         self.assertIn("browser:http://192.168.100.88:8080", html)
@@ -315,10 +410,17 @@ class WebAppTests(unittest.TestCase):
             "/api/controller/stop",
             "/api/game/start",
             "/api/game/stop",
+            "/api/analysis/openai",
+            "/api/arena/start",
+            "/api/arena/stop",
+            "/api/arena/confirm-manual",
+            "/api/commissioning/attest",
+            "/api/commissioning/clear",
             "/api/reconcile/apply",
             "/api/reconcile/discard",
             "/api/lichess/oauth/start",
             "/api/lichess/disconnect",
+            "/api/lichess/game/validate",
             "/api/setup/diagnostics",
             "/api/setup/endstops",
             "/api/setup/home",
@@ -375,13 +477,15 @@ class WebAppTests(unittest.TestCase):
         ):
             self.assertTrue(data["result"]["setup"][step])
 
-    def test_dashboard_includes_all_three_game_modes_and_prerequisite_gating(self):
-        for value in ("local", "lichess", "mirror"):
+    def test_dashboard_includes_all_four_game_modes_and_prerequisite_gating(self):
+        for value in ("local", "openai", "lichess", "mirror"):
             self.assertIn(f'value="{value}"', HTML)
         self.assertIn("modeReady", HTML)
         self.assertIn("stable_observations", HTML)
         self.assertIn("cap.lichess", HTML)
         self.assertIn("Boolean(p)", HTML)
+        self.assertIn("mode==='openai'", HTML)
+        self.assertIn('id="opponentStyle"', HTML)
 
     def test_dashboard_displays_grid_and_machine_coordinates(self):
         self.assertIn("piece.grid.x", HTML)
@@ -405,7 +509,10 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(data["board"]["revision"], 0)
         self.assertIsNone(data["pending"])
         self.assertIn("openai", data["capabilities"])
+        self.assertIn("anthropic", data["capabilities"])
         self.assertIn("lichess", data["capabilities"])
+        self.assertIn("arena", data)
+        self.assertTrue(data["commissioning"]["commissioned"])
         self.assertIn("ports", data)
         self.assertTrue(all(value["likely_printer"] for value in data["ports"]))
         self.assertFalse(data["lichess"]["connected"])
@@ -467,6 +574,7 @@ class WebAppTests(unittest.TestCase):
         self.assertFalse(data["result"]["calibrated"])
 
     def test_game_start_disconnects_manual_controller_and_routes_settings(self):
+        self.server.lichess_oauth.connected = True
         self.request("/api/controller/connect", {})
         self.request(
             "/api/game/start",
@@ -483,6 +591,91 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(self.server.game.started["mode"], "lichess")
         self.assertEqual(self.server.game.started["serial_port"], "DEMO")
         self.assertEqual(self.server.game.started["serial_baudrate"], 250000)
+
+    def test_openai_game_mode_routes_style_without_lichess(self):
+        self.request(
+            "/api/game/start",
+            {
+                "mode": "openai",
+                "local_color": "white",
+                "confirm_motion": True,
+                "opponent_style": "creative",
+            },
+        )
+        self.assertEqual(self.server.game.started["mode"], "openai")
+        self.assertEqual(self.server.game.started["opponent_style"], "creative")
+
+    def test_commissioning_attestation_and_clear_routes(self):
+        self.server.commissioning.commissioned = False
+        _, data = self.request(
+            "/api/commissioning/attest",
+            {"confirmation": "I CONFIRM PHYSICAL SETUP IS SAFE"},
+        )
+        self.assertTrue(data["result"]["commissioned"])
+        _, data = self.request("/api/commissioning/clear", {})
+        self.assertFalse(data["result"]["commissioned"])
+
+    def test_physical_arena_requires_commissioning(self):
+        self.server.commissioning.commissioned = False
+        request = urllib.request.Request(
+            self.base + "/api/arena/start",
+            data=json.dumps(
+                {
+                    "white": "chatgpt",
+                    "black": "claude",
+                    "physical": True,
+                    "confirm_motion": True,
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request)
+        self.assertEqual(raised.exception.code, 409)
+
+    def test_arena_start_stop_and_manual_confirmation_routes(self):
+        _, data = self.request(
+            "/api/arena/start",
+            {
+                "white": "chatgpt",
+                "black": "claude",
+                "style": "balanced",
+                "delay_s": 1,
+                "max_plies": 20,
+                "physical": True,
+                "confirm_motion": True,
+            },
+        )
+        self.assertEqual(data["result"]["state"], "running")
+        self.server.ai_arena.manual = {"uci": "e4d5"}
+        _, data = self.request(
+            "/api/arena/confirm-manual",
+            {"confirmation": "AI MOVE COMPLETED"},
+        )
+        self.assertIsNone(data["result"]["manual_action"])
+        _, data = self.request("/api/arena/stop", {})
+        self.assertEqual(data["result"]["state"], "idle")
+
+    def test_lichess_game_validation_route_returns_player_side(self):
+        self.server.lichess_oauth.connected = True
+        _, data = self.request("/api/lichess/game/validate", {"game_id": "game1234"})
+        self.assertTrue(data["result"]["ready"])
+        self.assertEqual(data["result"]["local_color"], "white")
+
+    def test_openai_analysis_endpoint_returns_structured_legal_move(self):
+        original = self.server.game.status
+        import chess
+
+        self.server.game.status = lambda: {
+            "status": {"fen": chess.Board().fen()},
+            "logs": "",
+        }
+        try:
+            _, data = self.request("/api/analysis/openai", {"style": "aggressive"})
+            self.assertEqual(data["result"]["uci"], "e2e4")
+            self.assertIn("aggressive", data["result"]["rationale"])
+        finally:
+            self.server.game.status = original
 
     def test_controller_connect_accepts_selected_port_and_baud(self):
         _, data = self.request(
