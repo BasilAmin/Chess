@@ -218,7 +218,7 @@ elif [[ -n $CAMERA_SOURCE ]]; then
   RUN_ARGS+=(--env "CHESS_GANTRY_CAMERA_SOURCE=$CAMERA_SOURCE" --env "CHESS_GANTRY_CAMERA_ENABLED=1")
   printf '==> Network or configured camera source attached\n'
 else
-  CAMERA_SOURCE="snapshot:http://192.168.100.88:8080/shot.jpg"
+  CAMERA_SOURCE="auto:http://192.168.100.88:8080"
   RUN_ARGS+=(--env "CHESS_GANTRY_CAMERA_SOURCE=$CAMERA_SOURCE" --env "CHESS_GANTRY_CAMERA_ENABLED=1")
   printf '==> Using default phone camera %s\n' "$CAMERA_SOURCE"
 fi

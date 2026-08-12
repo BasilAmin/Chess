@@ -194,9 +194,10 @@ class GameCoordinator:
                 camera.get("status") != "complete"
                 or camera.get("stable_observations", 0) < 2
                 or not camera.get("matches_standard_position")
+                or not camera.get("local", {}).get("profiles_ready")
             ):
                 raise ConfigurationError(
-                    "camera game requires two stable complete observations of the standard starting position"
+                    "camera game requires ArUco/board calibration, all six sampled colors, and three stable local observations of the standard starting position"
                 )
         if (
             not self.demo

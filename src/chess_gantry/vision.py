@@ -13,11 +13,20 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 from typing_extensions import Annotated, Self
 
 from .errors import ConfigurationError, ValidationError
+from .local_vision import (
+    COLOR_TO_TYPE,
+    ColorProfiles,
+    annotate_local_board,
+    board_piece_types,
+    detect_aruco_references,
+    detect_colored_board,
+    infer_type_move,
+)
 from .persistence import atomic_write_json, read_json
 
 
 MODEL = "gpt-5.6-sol"
-DEFAULT_PHONE_SOURCE = "browser:http://192.168.100.88:8080"
+DEFAULT_PHONE_SOURCE = "auto:http://192.168.100.88:8080"
 PIECE_SYMBOLS = "PNBRQKpnbrqk"
 
 
@@ -505,27 +514,36 @@ class _AutoSource:
     def __init__(self, base_url: str) -> None:
         base = base_url.rstrip("/")
         self.candidates = (
-            f"snapshot:{base}/shot.jpg",
             f"{base}/video",
+            f"snapshot:{base}/shot.jpg",
         )
         self.reader: Any = None
         self.resolved_source: Optional[str] = None
+        self._next_index = 0
 
     def read(self) -> Any:
         if self.reader is not None:
             try:
                 return self.reader.read()
             except Exception:
+                if self.resolved_source in self.candidates:
+                    self._next_index = (
+                        self.candidates.index(self.resolved_source) + 1
+                    ) % len(self.candidates)
                 self.reader.close()
                 self.reader = None
                 self.resolved_source = None
         errors = []
-        for candidate in self.candidates:
+        ordered = (
+            self.candidates[self._next_index :] + self.candidates[: self._next_index]
+        )
+        for candidate in ordered:
             try:
                 reader = open_frame_source(candidate)
                 frame = reader.read()
                 self.reader = reader
                 self.resolved_source = candidate
+                self._next_index = self.candidates.index(candidate)
                 return frame
             except Exception as exc:
                 errors.append(f"{candidate}: {exc}")
@@ -594,6 +612,7 @@ class SolVisionManager:
         move_handler: Optional[Callable[[str], None]] = None,
         geometry: Optional[Any] = None,
         calibration_path: Optional[Path] = None,
+        color_profile_path: Optional[Path] = None,
         source_factory: Callable[[str], Any] = open_frame_source,
     ) -> None:
         if interval_s < 1:
@@ -610,6 +629,7 @@ class SolVisionManager:
         self._move_handler = move_handler
         self._geometry = geometry
         self._calibration_path = calibration_path
+        self._color_profiles = ColorProfiles(color_profile_path)
         self._source_factory = source_factory
         self._enabled = False
         self._running = False
@@ -617,6 +637,7 @@ class SolVisionManager:
         self._active_source: Optional[str] = None
         self._resolved_source: Optional[str] = None
         self._raw_jpeg: Optional[bytes] = None
+        self._plan_jpeg: Optional[bytes] = None
         self._latest_jpeg: Optional[bytes] = None
         self._capture_error: Optional[str] = None
         self._inference_error: Optional[str] = None
@@ -632,6 +653,18 @@ class SolVisionManager:
         self._inferred_generation = 0
         self._last_frame_at: Optional[float] = None
         self._consecutive_errors = 0
+        self._local_candidate: Optional[tuple[tuple[int, str], ...]] = None
+        self._local_stable = 0
+        self._local_confidence = 0.0
+        self._local_unresolved: tuple[str, ...] = ()
+        self._local_types: dict[int, str] = {}
+        self._local_error: Optional[str] = None
+        self._local_last_at: Optional[float] = None
+        self._local_move: Optional[str] = None
+        self._local_callback_pending = False
+        self._local_frames = 0
+        self._local_last_ms: Optional[float] = None
+        self._local_started_at = time.monotonic()
         self._calibration: Optional[tuple[tuple[float, float], ...]] = None
         if calibration_path is not None and calibration_path.exists():
             raw = read_json(calibration_path)
@@ -688,6 +721,8 @@ class SolVisionManager:
             self._board = chess.Board(fen) if fen else chess.Board()
             self._candidate = None
             self._stable = 0
+            self._local_candidate = None
+            self._local_stable = 0
             self._last_move = None
             self._inference_error = None
         return self.status()
@@ -706,6 +741,8 @@ class SolVisionManager:
             self._board.push(move)
             self._candidate = None
             self._stable = 0
+            self._local_candidate = None
+            self._local_stable = 0
         return self.status()
 
     def set_move_handler(self, handler: Optional[Callable[[str], None]]) -> None:
@@ -745,6 +782,7 @@ class SolVisionManager:
         jpeg = result.pop("jpeg")
         with self._lock:
             self._raw_jpeg = jpeg
+            self._plan_jpeg = jpeg
             self._latest_jpeg = jpeg
             self._last_frame_at = time.time()
             self._frames += 1
@@ -752,6 +790,34 @@ class SolVisionManager:
             self._capture_error = None
             self._resolved_source = result["resolved_source"]
         return result
+
+    def calibrate_aruco(self) -> dict[str, Any]:
+        cv2, numpy = _vision_modules()
+        with self._lock:
+            jpeg = self._raw_jpeg
+        if jpeg is None:
+            raise ValidationError(
+                "no raw camera frame is available for ArUco calibration"
+            )
+        frame = cv2.imdecode(
+            numpy.frombuffer(jpeg, dtype=numpy.uint8), cv2.IMREAD_COLOR
+        )
+        if frame is None:
+            raise ValidationError("raw camera frame cannot be decoded")
+        return self.calibrate(detect_aruco_references(frame))
+
+    def sample_piece_color(self, color: str, x: float, y: float) -> dict[str, Any]:
+        cv2, numpy = _vision_modules()
+        with self._lock:
+            jpeg = self._plan_jpeg
+        if jpeg is None:
+            raise ValidationError("no plan-view frame is available for color sampling")
+        frame = cv2.imdecode(
+            numpy.frombuffer(jpeg, dtype=numpy.uint8), cv2.IMREAD_COLOR
+        )
+        if frame is None:
+            raise ValidationError("plan-view frame cannot be decoded")
+        return self._color_profiles.sample(frame, color, x, y)
 
     def calibrate(self, corners: Any) -> dict[str, Any]:
         parsed = validate_calibration(corners)
@@ -807,6 +873,7 @@ class SolVisionManager:
         plan_jpeg = encode_jpeg(plan_frame)
         with self._lock:
             self._raw_jpeg = raw_jpeg
+            self._plan_jpeg = plan_jpeg
             self._latest_jpeg = plan_jpeg
             self._frames += 1
             self._frame_generation += 1
@@ -815,7 +882,84 @@ class SolVisionManager:
             self._running = True
             self._capture_error = None
             self._resolved_source = self._source
+        self._process_local(plan_frame)
         self._inference_wake.set()
+
+    def _process_local(self, plan_frame: Any) -> None:
+        if self._calibration is None:
+            return
+        started = time.monotonic()
+        try:
+            observation = detect_colored_board(
+                plan_frame, self._color_profiles, orientation=self._orientation
+            )
+            annotated = annotate_local_board(
+                plan_frame, observation, orientation=self._orientation
+            )
+            annotated_jpeg = encode_jpeg(annotated)
+            fingerprint = tuple(sorted(observation.types.items()))
+            with self._lock:
+                self._local_types = dict(observation.types)
+                self._local_confidence = observation.confidence
+                self._local_unresolved = observation.unresolved
+                self._local_error = None
+                self._local_last_at = time.time()
+                self._latest_jpeg = annotated_jpeg
+                self._local_frames += 1
+                self._local_last_ms = round((time.monotonic() - started) * 1000, 2)
+                if fingerprint == self._local_candidate:
+                    self._local_stable += 1
+                else:
+                    self._local_candidate = fingerprint
+                    self._local_stable = 1
+                board = (
+                    self._board.copy(stack=True) if self._board is not None else None
+                )
+                ready = (
+                    board is not None
+                    and self._color_profiles.ready
+                    and self._local_stable >= 3
+                    and observation.complete
+                    and observation.confidence >= 0.45
+                    and not self._paused
+                    and not self._local_callback_pending
+                )
+            if ready:
+                move = infer_type_move(board, observation.types)
+                if move is not None:
+                    self._dispatch_local_move(move.uci())
+        except Exception as exc:
+            with self._lock:
+                self._local_error = str(exc)
+                self._local_stable = 0
+
+    def _dispatch_local_move(self, uci: str) -> None:
+        with self._lock:
+            if self._local_callback_pending:
+                return
+            self._local_callback_pending = True
+
+        def run() -> None:
+            try:
+                handler = self._move_handler
+                if handler is not None:
+                    handler(uci)
+                with self._lock:
+                    if self._board is not None:
+                        move = self._board.parse_uci(uci)
+                        self._board.push(move)
+                    self._local_move = uci
+                    self._last_move = uci
+                    self._local_candidate = None
+                    self._local_stable = 0
+            except Exception as exc:
+                with self._lock:
+                    self._local_error = str(exc)
+            finally:
+                with self._lock:
+                    self._local_callback_pending = False
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _accept(self, result: BoardTranscription) -> None:
         rows = result.rows.values()
@@ -905,12 +1049,20 @@ class SolVisionManager:
                 enabled = self._enabled
                 paused = self._paused
                 generation = self._frame_generation
-                jpeg = self._latest_jpeg
+                jpeg = self._plan_jpeg
+                local_ready = (
+                    self._color_profiles.ready
+                    and self._local_stable >= 2
+                    and not self._local_unresolved
+                    and self._local_confidence >= 0.45
+                    and self._local_error is None
+                )
             if (
                 not enabled
                 or paused
                 or jpeg is None
                 or generation == self._inferred_generation
+                or local_ready
             ):
                 self._inference_wake.wait(0.5)
                 self._inference_wake.clear()
@@ -931,7 +1083,16 @@ class SolVisionManager:
                     self._inferred_generation = generation
                     self._transcription = result
                     self._inference_error = None
-                    self._accept(result)
+                    local_authoritative = self._color_profiles.ready and (
+                        self._local_move is not None
+                        or (
+                            self._local_stable >= 2
+                            and not self._local_unresolved
+                            and self._local_error is None
+                        )
+                    )
+                    if not local_authoritative:
+                        self._accept(result)
             except Exception as exc:
                 with self._lock:
                     self._inferred_generation = generation
@@ -952,6 +1113,44 @@ class SolVisionManager:
         with self._lock:
             result = self._transcription
             rows = result.rows.values() if result is not None else None
+            local_standard = (
+                self._color_profiles.ready
+                and self._local_types == board_piece_types(chess.Board())
+            )
+            effective_rows = rows
+            if (
+                effective_rows is None
+                and self._board is not None
+                and self._color_profiles.ready
+                and self._local_stable >= 2
+            ):
+                effective_rows = tuple(
+                    "".join(
+                        (
+                            self._board.piece_at(
+                                chess.square(file_index, rank)
+                            ).symbol()
+                            if self._board.piece_at(chess.square(file_index, rank))
+                            else "."
+                        )
+                        for file_index in range(8)
+                    )
+                    for rank in range(7, -1, -1)
+                )
+            elif effective_rows is None and local_standard:
+                effective_rows = tuple(
+                    "".join(
+                        (
+                            chess.Board()
+                            .piece_at(chess.square(file_index, rank))
+                            .symbol()
+                            if chess.Board().piece_at(chess.square(file_index, rank))
+                            else "."
+                        )
+                        for file_index in range(8)
+                    )
+                    for rank in range(7, -1, -1)
+                )
             standard_match = False
             if rows and result is not None and result.status == "complete":
                 standard_match = image_rows_to_board(
@@ -968,17 +1167,28 @@ class SolVisionManager:
                 "capture_error": self._capture_error,
                 "inference_error": self._inference_error,
                 "resolved_source": self._resolved_source,
-                "status": result.status if result else "idle",
+                "status": (
+                    "complete"
+                    if self._color_profiles.ready
+                    and self._local_stable >= 3
+                    and not self._local_unresolved
+                    and self._local_confidence >= 0.45
+                    else result.status if result else "idle"
+                ),
                 "confidence": result.confidence.model_dump() if result else None,
                 "problems": list(result.problems) if result else [],
                 "image_rows": list(rows) if rows else None,
-                "rows": list(canonical_rows(rows, self._orientation)) if rows else None,
+                "rows": (
+                    list(canonical_rows(effective_rows, self._orientation))
+                    if effective_rows
+                    else None
+                ),
                 "pieces": (
-                    board_payload(rows, self._orientation, self._geometry)
-                    if rows
+                    board_payload(effective_rows, self._orientation, self._geometry)
+                    if effective_rows
                     else []
                 ),
-                "stable_observations": self._stable,
+                "stable_observations": max(self._stable, self._local_stable),
                 "last_move": self._last_move,
                 "fen": self._board.fen() if self._board is not None else None,
                 "turn": (
@@ -986,7 +1196,7 @@ class SolVisionManager:
                     if self._board
                     else None
                 ),
-                "matches_standard_position": standard_match,
+                "matches_standard_position": standard_match or local_standard,
                 "frames": self._frames,
                 "requests": self._requests,
                 "paused": self._paused,
@@ -1007,6 +1217,40 @@ class SolVisionManager:
                     if self._calibration
                     else None
                 ),
+                "detection_mode": (
+                    "local"
+                    if self._color_profiles.ready
+                    and (
+                        (self._local_stable >= 2 and not self._local_unresolved)
+                        or self._local_move is not None
+                    )
+                    else (
+                        "calibrate_colors"
+                        if not self._color_profiles.ready
+                        else "sol_fallback" if result is not None else "waiting_local"
+                    )
+                ),
+                "local": {
+                    "confidence": self._local_confidence,
+                    "stable_frames": self._local_stable,
+                    "unresolved": list(self._local_unresolved),
+                    "error": self._local_error,
+                    "last_at": self._local_last_at,
+                    "last_move": self._local_move,
+                    "frames": self._local_frames,
+                    "last_ms": self._local_last_ms,
+                    "hz": round(
+                        self._local_frames
+                        / max(0.001, time.monotonic() - self._local_started_at),
+                        2,
+                    ),
+                    "profiles": self._color_profiles.status(),
+                    "profiles_ready": self._color_profiles.ready,
+                    "detected": {
+                        chess.square_name(square): piece_type
+                        for square, piece_type in self._local_types.items()
+                    },
+                },
             }
 
 

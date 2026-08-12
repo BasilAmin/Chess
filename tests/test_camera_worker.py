@@ -257,7 +257,7 @@ class CameraWorkerTests(unittest.TestCase):
         finally:
             manager.close()
 
-    def test_auto_source_prefers_snapshot_and_falls_back_to_video(self):
+    def test_auto_source_prefers_video_and_falls_back_to_snapshot(self):
         import chess_gantry.vision as vision
 
         original = vision.open_frame_source
@@ -265,7 +265,7 @@ class CameraWorkerTests(unittest.TestCase):
 
         def fake_open(source):
             opened.append(source)
-            if source.startswith("snapshot:"):
+            if source.endswith("/video"):
                 return FrameSource(fail=True)
             return FrameSource()
 
@@ -277,11 +277,48 @@ class CameraWorkerTests(unittest.TestCase):
             self.assertEqual(
                 opened,
                 [
-                    "snapshot:http://phone:8080/shot.jpg",
                     "http://phone:8080/video",
+                    "snapshot:http://phone:8080/shot.jpg",
                 ],
             )
-            self.assertEqual(source.resolved_source, "http://phone:8080/video")
+            self.assertEqual(
+                source.resolved_source, "snapshot:http://phone:8080/shot.jpg"
+            )
+        finally:
+            source.close()
+            vision.open_frame_source = original
+
+    def test_auto_source_switches_to_snapshot_after_mjpeg_stalls(self):
+        import chess_gantry.vision as vision
+
+        original = vision.open_frame_source
+        opened = []
+
+        class OneFrame(FrameSource):
+            def read(self):
+                if self.reads:
+                    raise ValidationError("MJPEG stalled")
+                return super().read()
+
+        def fake_open(source):
+            opened.append(source)
+            return OneFrame() if source.endswith("/video") else FrameSource()
+
+        vision.open_frame_source = fake_open
+        source = _AutoSource("http://phone:8080")
+        try:
+            source.read()
+            source.read()
+            self.assertEqual(
+                opened,
+                [
+                    "http://phone:8080/video",
+                    "snapshot:http://phone:8080/shot.jpg",
+                ],
+            )
+            self.assertEqual(
+                source.resolved_source, "snapshot:http://phone:8080/shot.jpg"
+            )
         finally:
             source.close()
             vision.open_frame_source = original

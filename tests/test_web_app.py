@@ -88,11 +88,43 @@ class FakeCamera:
             "consecutive_errors": 0,
             "calibrated": self.calibrated,
             "calibration": None,
+            "detection_mode": "calibrate_colors",
+            "local": {
+                "confidence": 0.0,
+                "stable_frames": 0,
+                "unresolved": [],
+                "error": None,
+                "last_at": None,
+                "last_move": None,
+                "frames": 0,
+                "last_ms": None,
+                "hz": 0.0,
+                "profiles_ready": False,
+                "profiles": {
+                    color: {"type": piece_type, "sampled": False}
+                    for color, piece_type in {
+                        "green": "pawn",
+                        "blue": "bishop",
+                        "brown": "rook",
+                        "pink": "knight",
+                        "yellow": "king",
+                        "orange": "queen",
+                    }.items()
+                },
+                "detected": {},
+            },
         }
 
     def calibrate(self, corners):
         self.calibrated = True
         return self.status()
+
+    def calibrate_aruco(self):
+        self.calibrated = True
+        return self.status()
+
+    def sample_piece_color(self, color, x, y):
+        return {"color": color, "type": "pawn", "hue": 60}
 
     def clear_calibration(self):
         self.calibrated = False
@@ -369,15 +401,24 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("Claude vs ChatGPT", html)
         self.assertIn("Mark commissioned", html)
         self.assertIn("Start Claude vs ChatGPT", html)
+        self.assertIn("ArUco + color caps", html)
+        self.assertIn("Green · pawns", html)
+        self.assertIn("Blue · bishops", html)
+        self.assertIn("Brown · rooks", html)
+        self.assertIn("Pink · knights", html)
+        self.assertIn("Yellow · kings", html)
+        self.assertIn("Orange · queens", html)
         self.assertIn('id="flipBoard"', html)
         self.assertIn('id="moveHistory"', html)
-        self.assertIn('id="phoneStream"', html)
-        self.assertIn('id="cameraCanvas"', html)
-        self.assertIn("browser:http://192.168.100.88:8080", html)
+        self.assertNotIn('id="phoneStream"', html)
+        self.assertNotIn('id="cameraCanvas"', html)
+        self.assertIn("auto:http://192.168.100.88:8080", html)
         self.assertIn('id="readyCamera"', html)
         self.assertIn("@media(max-width:680px)", html)
         self.assertNotIn("MCP23017", html)
-        self.assertNotIn("ArUco", html)
+        self.assertIn("ArUco + color caps", html)
+        self.assertIn("Generate 4 references", html)
+        self.assertIn("Auto-calibrate ArUco", html)
 
     def test_every_javascript_dom_reference_exists_in_dashboard(self):
         ids = set(re.findall(r'id="([A-Za-z][A-Za-z0-9_-]*)"', HTML))
@@ -401,8 +442,10 @@ class WebAppTests(unittest.TestCase):
         for route in (
             "/api/camera/configure",
             "/api/camera/probe",
-            "/api/camera/browser-frame",
             "/api/camera/calibrate",
+            "/api/camera/calibrate-aruco",
+            "/api/camera/color/sample",
+            "/api/camera/markers/generate",
             "/api/camera/calibration/clear",
             "/api/controller/connect",
             "/api/controller/disconnect",
@@ -498,7 +541,6 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("camera.stale", HTML)
         self.assertIn("capture_error", HTML)
         self.assertIn("inference_error", HTML)
-        self.assertIn("/api/camera/browser-frame", HTML)
         self.assertIn("consecutive_errors", self.server.camera.status())
         self.assertIn("data.controller.last_error", HTML)
 
@@ -572,6 +614,24 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(data["result"]["calibrated"])
         _, data = self.request("/api/camera/calibration/clear", {})
         self.assertFalse(data["result"]["calibrated"])
+
+    def test_aruco_and_color_sampling_endpoints(self):
+        _, data = self.request("/api/camera/calibrate-aruco", {})
+        self.assertTrue(data["result"]["calibrated"])
+        _, data = self.request(
+            "/api/camera/color/sample",
+            {"color": "green", "x": 0.5, "y": 0.5},
+        )
+        self.assertEqual(data["result"]["color"], "green")
+
+    def test_marker_generation_returns_downloadable_pngs(self):
+        _, data = self.request("/api/camera/markers/generate", {})
+        self.assertEqual(len(data["result"]["files"]), 4)
+        first = data["result"]["files"][0]
+        self.assertTrue(first["name"].endswith(".png"))
+        with urllib.request.urlopen(self.base + first["url"]) as response:
+            self.assertEqual(response.headers["Content-Type"], "image/png")
+            self.assertTrue(response.read().startswith(b"\x89PNG"))
 
     def test_game_start_disconnects_manual_controller_and_routes_settings(self):
         self.server.lichess_oauth.connected = True

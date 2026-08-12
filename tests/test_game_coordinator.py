@@ -39,6 +39,7 @@ class FakeVision:
             "status": "complete",
             "stable_observations": 2,
             "matches_standard_position": True,
+            "local": {"profiles_ready": True},
         }
 
 
@@ -237,6 +238,7 @@ class CoordinatorTests(unittest.TestCase):
             "status": "complete",
             "stable_observations": 2,
             "matches_standard_position": False,
+            "local": {"profiles_ready": True},
         }
         with self.assertRaisesRegex(ConfigurationError, "standard starting"):
             self.coordinator.start(

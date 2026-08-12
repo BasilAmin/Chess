@@ -91,6 +91,7 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertIn("FFMPEG", verifier)
         self.assertIn('"openai"', verifier)
         self.assertIn('"anthropic"', verifier)
+        self.assertIn('"chess_gantry.local_vision"', verifier)
 
     def test_run_script_supports_network_and_v4l2_cameras(self) -> None:
         script = (ROOT / "run.sh").read_text(encoding="utf-8")
@@ -98,7 +99,7 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertIn("CHESS_GANTRY_VIDEO_DEVICE", script)
         self.assertIn('--device "$VIDEO_DEVICE:/dev/video0"', script)
         self.assertIn("CHESS_GANTRY_CAMERA_ENABLED=1", script)
-        self.assertIn("snapshot:http://192.168.100.88:8080/shot.jpg", script)
+        self.assertIn("auto:http://192.168.100.88:8080", script)
         self.assertIn("OPENAI_API_KEY", script)
 
     def test_dockerignore_excludes_large_local_directories(self) -> None:

@@ -34,11 +34,11 @@ flowchart LR
 
 | Capability              | Status                                                      |
 | ----------------------- | ----------------------------------------------------------- |
-| Phone snapshot          | `snapshot:http://192.168.100.88:8080/shot.jpg` by default   |
-| Phone MJPEG source      | `http://192.168.100.88:8080/video` remains supported        |
-| Board recognition       | OpenAI `gpt-5.6-sol`, strict structured output              |
-| Move validation         | Two matching complete observations and one legal successor  |
-| Local two-player game   | Both people move pieces; Sol registers every move           |
+| Phone camera            | `auto:http://192.168.100.88:8080`                           |
+| Fast recognition        | Local OpenCV ArUco + six calibrated cap colors              |
+| Fallback recognition    | OpenAI `gpt-5.6-sol` structured visual audit                |
+| Move validation         | Three local frames and exactly one legal successor          |
+| Local two-player game   | Both people move pieces; local OpenCV registers each move   |
 | Human versus Lichess/AI | Camera submits the local side; gantry executes remote side  |
 | Two-AI physical mirror  | Gantry executes both sides from a fresh Lichess game        |
 | Normal physical moves   | Supported with Marlin acknowledgements and local journaling |
@@ -47,8 +47,9 @@ flowchart LR
 | Remote gantry captures  | Blocked until capture storage coordinates are calibrated    |
 | Promotion               | Blocked for physical replacement confirmation               |
 
-Reed switches, MCP23017, synthetic occupancy, color caps, and ArUco markers have
-been removed. The only recognition source is Sol.
+Reed switches and MCP23017 are no longer in the runtime path. Fast move
+recognition uses four ArUco board references plus calibrated color caps, with Sol
+reserved for ambiguous frames and visual audit.
 
 ## Why OpenCV Is Still Installed
 
@@ -107,6 +108,77 @@ camera app open, use the rear normal lens, disable sleep, and mount the phone
 rigidly above the board. The board should fill most of the image with all four
 edges visible.
 
+## Fast Local Move Detection
+
+Real-time games use local OpenCV, not Sol, in the critical move-detection path:
+
+```text
+phone MJPEG
+-> four ArUco board references
+-> 1024x1024 plan view
+-> six color masks
+-> per-square piece type layout
+-> three stable frames
+-> python-chess legal move match
+```
+
+Sol is a fallback and audit source only when local colors are incomplete or
+ambiguous.
+
+Required cap colors:
+
+| Color  | Piece type |
+| ------ | ---------- |
+| Green  | Pawn       |
+| Blue   | Bishop     |
+| Brown  | Rook       |
+| Pink   | Knight     |
+| Yellow | King       |
+| Orange | Queen      |
+
+Black and White use the same type colors. Side and permanent identity are
+preserved from the standard starting position plus the legal move history. The
+detector never guesses side from cap color.
+
+Use flat, matte, saturated caps of a consistent material. Avoid glossy tape,
+pastel shades, translucent plastic, and colors already dominant on the board.
+Each cap should occupy a clear area near the center of its square in plan view.
+Brown rooks must be visibly darker than orange queens; the calibrated detector
+uses brightness as well as hue to separate them.
+
+### ArUco Board References
+
+In **ArUco + color caps**, press **Generate 4 references** and download/print:
+
+```text
+0 top-left
+1 top-right
+2 bottom-right
+3 bottom-left
+```
+
+Place each marker outside its corresponding board corner with all printed labels
+upright in the camera image. Do not rotate individual markers. Press
+**Auto-calibrate ArUco**. The marker corners nearest the playing area define the
+board quadrilateral, so the phone may remain fixed overhead without being
+hand-held isometrically.
+
+### Sample Six Physical Colors
+
+Switch to **Plan view**. For each color:
+
+1. Select the color/type in **ArUco + color caps**.
+2. Press **Sample selected color**.
+3. Click the center of one real cap of that color.
+
+All six must display `calibrated`. Profiles persist under `data/` and include
+hue, saturation, and brightness, which separates dark brown rooks from bright
+orange queens.
+
+The Fast Vision panel shows detection mode, confidence, frames per second,
+milliseconds per local frame, stable-frame count, and unresolved squares. Games
+unlock only after three stable local observations of the standard position.
+
 The phone app must actively start its camera server. Merely opening the app is
 not enough. Its screen should show that the server is running on port 8080. If
 the dashboard reports `connection refused`, restart the server inside the phone
@@ -124,15 +196,14 @@ file /tmp/chess-board.jpg
 Or use the dashboard source probe without spending Sol tokens:
 
 ```text
-Camera source: browser:http://192.168.100.88:8080
+Camera source: auto:http://192.168.100.88:8080
 Button: Test phone
 ```
 
-Browser mode opens the phone's MJPEG stream directly in the browser, where native
-MJPEG playback is most reliable. Once per second a hidden canvas JPEG-encodes the
-same visible frame and uploads it to the local backend for calibration, plan
-view, Sol, legality, and game control. The phone receives exactly one client
-connection and Sol latency cannot freeze the broadcast.
+Auto mode opens one backend MJPEG connection and falls back to cache-busted
+snapshots when needed. The GUI consumes the backend's local proxy, so the phone
+never serves competing browser and Python clients. OpenCV analysis and Sol
+fallback run independently of the preview.
 The UI reports the resolved endpoint, image dimensions, and latency. A historical
 cached image never counts as connected: the readiness strip requires a fresh
 frame less than three seconds old.
@@ -248,7 +319,8 @@ In the UI:
 3. Press **Calibrate 4 corners** and click top-left, top-right, bottom-right, then
    bottom-left. The software perspective-warps that shape to a square 1024×1024
    board before Sol sees it.
-4. Wait for `complete`, `2 / 2`, and an exact standard-position match.
+4. Sample all six cap colors and wait for `complete`, `3 / 3`, and an exact
+   standard-position match.
 5. Confirm every displayed square, grid coordinate, and machine millimeter value.
 6. Scan serial ports, select the CH340 device/baud, connect, and home.
 7. Use **Connect Lichess** for Lichess modes.
@@ -327,7 +399,7 @@ Add both provider keys to the ignored `.env.local` file:
 ```text
 OPENAI_API_KEY='your_openai_key'
 ANTHROPIC_API_KEY='your_anthropic_key'
-CHESS_GANTRY_CAMERA_SOURCE='browser:http://192.168.100.88:8080'
+CHESS_GANTRY_CAMERA_SOURCE='auto:http://192.168.100.88:8080'
 ```
 
 Then:
