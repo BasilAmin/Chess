@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 import copy
+import math
 import re
 
 from .errors import StateError, ValidationError
@@ -10,7 +11,8 @@ from .errors import StateError, ValidationError
 _ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 _STATUS_BOARD = "board"
 _STATUS_CAPTURED = "captured"
-_ALLOWED_STATUSES = {_STATUS_BOARD, _STATUS_CAPTURED}
+_STATUS_BUFFERED = "buffered"
+_ALLOWED_STATUSES = {_STATUS_BOARD, _STATUS_CAPTURED, _STATUS_BUFFERED}
 
 
 def _strict_int(value: Any, name: str) -> int:
@@ -189,6 +191,8 @@ class PieceState:
     x: Optional[int] = None
     y: Optional[int] = None
     capture_slot: Optional[int] = None
+    machine_x: Optional[float] = None
+    machine_y: Optional[float] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -202,7 +206,15 @@ class PieceState:
         pid = _valid_identifier(piece_id, "piece id")
         if not isinstance(raw, Mapping):
             raise ValidationError(f"piece {pid!r} must be a JSON object")
-        allowed = {"status", "x", "y", "capture_slot", "metadata"}
+        allowed = {
+            "status",
+            "x",
+            "y",
+            "capture_slot",
+            "machine_x",
+            "machine_y",
+            "metadata",
+        }
         unknown = set(raw) - allowed
         if unknown:
             raise ValidationError(
@@ -230,16 +242,46 @@ class PieceState:
                 raise ValidationError(
                     f"piece {pid!r} on the board cannot have capture_slot"
                 )
+            if raw.get("machine_x") is not None or raw.get("machine_y") is not None:
+                raise ValidationError(
+                    f"piece {pid!r} on the board cannot have buffered machine coordinates"
+                )
             return cls(
                 piece_id=pid, status=status, x=pos.x, y=pos.y, metadata=metadata_copy
             )
 
+        if raw.get("x") is not None or raw.get("y") is not None:
+            raise ValidationError(
+                f"off-board piece {pid!r} must use null/omitted x and y"
+            )
+        if status == _STATUS_BUFFERED:
+            machine_x = raw.get("machine_x")
+            machine_y = raw.get("machine_y")
+            if isinstance(machine_x, bool) or not isinstance(machine_x, (int, float)):
+                raise ValidationError(f"buffered piece {pid!r} needs numeric machine_x")
+            if isinstance(machine_y, bool) or not isinstance(machine_y, (int, float)):
+                raise ValidationError(f"buffered piece {pid!r} needs numeric machine_y")
+            if not math.isfinite(float(machine_x)) or not math.isfinite(
+                float(machine_y)
+            ):
+                raise ValidationError(
+                    f"buffered piece {pid!r} machine coordinates must be finite"
+                )
+            if raw.get("capture_slot") is not None:
+                raise ValidationError(f"buffered piece {pid!r} cannot use capture_slot")
+            return cls(
+                piece_id=pid,
+                status=status,
+                machine_x=float(machine_x),
+                machine_y=float(machine_y),
+                metadata=metadata_copy,
+            )
         slot = _strict_int(raw.get("capture_slot"), f"piece {pid}.capture_slot")
         if slot < 0:
             raise ValidationError(f"piece {pid!r} capture_slot must be non-negative")
-        if raw.get("x") is not None or raw.get("y") is not None:
+        if raw.get("machine_x") is not None or raw.get("machine_y") is not None:
             raise ValidationError(
-                f"captured piece {pid!r} must use null/omitted x and y"
+                f"captured piece {pid!r} cannot have machine coordinates"
             )
         return cls(
             piece_id=pid,
@@ -260,7 +302,13 @@ class PieceState:
         if self.status == _STATUS_BOARD:
             result.update({"x": self.x, "y": self.y})
         else:
-            result.update({"x": None, "y": None, "capture_slot": self.capture_slot})
+            result.update({"x": None, "y": None})
+            if self.status == _STATUS_CAPTURED:
+                result["capture_slot"] = self.capture_slot
+            else:
+                result.update(
+                    {"machine_x": self.machine_x, "machine_y": self.machine_y}
+                )
         if self.metadata:
             result["metadata"] = copy.deepcopy(dict(self.metadata))
         return result
@@ -317,9 +365,9 @@ class BoardState:
             )
 
         schema_version = _strict_int(raw.get("schema_version", 1), "schema_version")
-        if schema_version != 1:
+        if schema_version not in {1, 2}:
             raise ValidationError(
-                f"unsupported board state schema_version {schema_version}; expected 1"
+                f"unsupported board state schema_version {schema_version}; expected 1 or 2"
             )
         revision = _strict_int(raw.get("revision", 0), "revision")
         if revision < 0:
@@ -346,7 +394,7 @@ class BoardState:
                         f"pieces {occupied[pos]!r} and {piece.piece_id!r} both occupy ({pos.x}, {pos.y})"
                     )
                 occupied[pos] = piece.piece_id
-            else:
+            elif piece.status == _STATUS_CAPTURED:
                 assert piece.capture_slot is not None
                 if piece.capture_slot in capture_slots:
                     raise ValidationError(
@@ -354,6 +402,15 @@ class BoardState:
                         f"capture slot {piece.capture_slot}"
                     )
                 capture_slots[piece.capture_slot] = piece.piece_id
+            else:
+                if schema_version != 2:
+                    raise ValidationError(
+                        "buffered pieces require board state schema_version 2"
+                    )
+                if piece.machine_x is None or piece.machine_y is None:
+                    raise ValidationError(
+                        f"buffered piece {piece.piece_id!r} lacks machine coordinates"
+                    )
 
         events_raw = raw.get("processed_events", [])
         if not isinstance(events_raw, list):
@@ -400,6 +457,64 @@ class BoardState:
             if piece.status == _STATUS_CAPTURED and piece.capture_slot is not None
         }
 
+    def buffer_piece(
+        self, piece_id: str, point: MachinePoint, event_id: Optional[str] = None
+    ) -> "BoardState":
+        if not math.isfinite(point.x) or not math.isfinite(point.y):
+            raise StateError("castling buffer coordinates must be finite")
+        piece = self.pieces.get(piece_id)
+        if piece is None or piece.status != _STATUS_BOARD:
+            raise StateError(f"piece {piece_id!r} is not available on the board")
+        pieces = dict(self.pieces)
+        pieces[piece_id] = replace(
+            piece,
+            status=_STATUS_BUFFERED,
+            x=None,
+            y=None,
+            capture_slot=None,
+            machine_x=point.x,
+            machine_y=point.y,
+        )
+        events = list(self.processed_events)
+        if event_id:
+            events.append(_valid_identifier(event_id, "event_id"))
+        return BoardState(
+            2,
+            self.revision + 1,
+            pieces,
+            tuple(events[-512:]),
+        )
+
+    def unbuffer_piece(
+        self,
+        piece_id: str,
+        destination: GridPosition,
+        event_id: Optional[str] = None,
+    ) -> "BoardState":
+        piece = self.pieces.get(piece_id)
+        if piece is None or piece.status != _STATUS_BUFFERED:
+            raise StateError(f"piece {piece_id!r} is not in the castling buffer")
+        if self.piece_at(destination) is not None:
+            raise StateError("castling buffer destination is occupied")
+        pieces = dict(self.pieces)
+        pieces[piece_id] = replace(
+            piece,
+            status=_STATUS_BOARD,
+            x=destination.x,
+            y=destination.y,
+            machine_x=None,
+            machine_y=None,
+        )
+        events = list(self.processed_events)
+        if event_id:
+            events.append(_valid_identifier(event_id, "event_id"))
+        return BoardState(
+            self.schema_version,
+            self.revision + 1,
+            pieces,
+            tuple(events[-512:]),
+        )
+
     def validate_move(self, move: MoveDelta) -> Optional[PieceState]:
         if move.event_id is not None and move.event_id in self.processed_events:
             raise StateError(f"event {move.event_id!r} has already been applied")
@@ -443,6 +558,36 @@ class BoardState:
                 "explicit destination capture does not match destination occupant"
             )
         return captured
+
+    def capture_piece(
+        self,
+        piece_id: str,
+        capture_slot: int,
+        event_id: Optional[str] = None,
+        max_events: int = 512,
+    ) -> "BoardState":
+        piece = self.pieces.get(piece_id)
+        if piece is None or piece.status != _STATUS_BOARD:
+            raise StateError(f"capture target {piece_id!r} is not on the board")
+        if capture_slot < 0 or capture_slot in self.used_capture_slots():
+            raise StateError(f"capture slot {capture_slot} is not available")
+        pieces = dict(self.pieces)
+        pieces[piece_id] = replace(
+            piece,
+            status=_STATUS_CAPTURED,
+            x=None,
+            y=None,
+            capture_slot=capture_slot,
+        )
+        events = list(self.processed_events)
+        if event_id is not None:
+            events.append(_valid_identifier(event_id, "event_id"))
+        return BoardState(
+            self.schema_version,
+            self.revision + 1,
+            pieces,
+            tuple(events[-max_events:]),
+        )
 
     def applied(
         self, move: MoveDelta, capture_slot: Optional[int], max_events: int = 512

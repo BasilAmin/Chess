@@ -118,10 +118,25 @@ class GantryService:
                 "the destination is occupied, but captures are disabled. Configure real off-board capture slots first"
             )
         used = state.used_capture_slots()
+        if self.config.capture.mode == "eject":
+            return next(value for value in range(4096) if value not in used)
         for slot in range(len(self.config.capture.slots)):
             if slot not in used:
                 return slot
         raise PlanningError("all configured capture slots are already occupied")
+
+    def _capture_point_for(
+        self, captured_position: MachinePoint, capture_slot: int
+    ) -> MachinePoint:
+        if self.config.capture.mode == "eject":
+            return min(
+                self.config.capture.eject_points,
+                key=lambda point: math.hypot(
+                    point.x - captured_position.x,
+                    point.y - captured_position.y,
+                ),
+            )
+        return self.config.capture.slots[capture_slot]
 
     def _physical_obstacles(
         self,
@@ -139,7 +154,10 @@ class GantryService:
                 assert position is not None
                 points.append(grid_to_machine(position, self.config.board))
             elif piece.capture_slot is not None:
-                if not self.config.capture.enabled:
+                if (
+                    not self.config.capture.enabled
+                    or self.config.capture.mode == "eject"
+                ):
                     continue
                 if piece.capture_slot >= len(self.config.capture.slots):
                     raise StateError(
@@ -147,6 +165,9 @@ class GantryService:
                         f"{len(self.config.capture.slots)} slot(s) are configured"
                     )
                 points.append(self.config.capture.slots[piece.capture_slot])
+            elif piece.status == "buffered":
+                assert piece.machine_x is not None and piece.machine_y is not None
+                points.append(MachinePoint(piece.machine_x, piece.machine_y))
         for slot in extra_capture_slots:
             if not 0 <= slot < len(self.config.capture.slots):
                 raise StateError(f"capture slot {slot} is outside configured slots")
@@ -164,7 +185,7 @@ class GantryService:
             captured_position = captured.board_position
             assert captured_position is not None
             capture_start = grid_to_machine(captured_position, self.config.board)
-            capture_end = self.config.capture.slots[capture_slot]
+            capture_end = self._capture_point_for(capture_start, capture_slot)
             capture_obstacles = self._physical_obstacles(
                 board_state,
                 exclude_piece_ids={captured.piece_id},
@@ -195,7 +216,11 @@ class GantryService:
         move_obstacles = self._physical_obstacles(
             board_state,
             exclude_piece_ids=exclusions,
-            extra_capture_slots=() if capture_slot is None else (capture_slot,),
+            extra_capture_slots=(
+                (capture_slot,)
+                if capture_slot is not None and self.config.capture.mode == "slots"
+                else ()
+            ),
         )
         move_path = plan_path(
             move_start,
@@ -225,6 +250,165 @@ class GantryService:
             program=program,
             next_state=next_state,
         )
+
+    def plan_capture_ejection(
+        self, move: MoveDelta, state: Optional[BoardState] = None
+    ) -> MotionPlan:
+        board_state = state if state is not None else self.store.load()
+        captured = board_state.validate_move(move)
+        if captured is None or self.config.capture.mode != "eject":
+            raise PlanningError("capture ejection requires an ejection-mode capture")
+        capture_slot = self._capture_slot_for(board_state)
+        captured_position = captured.board_position
+        assert captured_position is not None
+        start = grid_to_machine(captured_position, self.config.board)
+        end = self._capture_point_for(start, capture_slot)
+        obstacles = self._physical_obstacles(
+            board_state, exclude_piece_ids={captured.piece_id}
+        )
+        path = plan_path(
+            start,
+            end,
+            obstacles,
+            self.config.workspace,
+            self.config.planner,
+        )
+        transfer = PieceTransfer(
+            piece_id=captured.piece_id,
+            purpose="capture",
+            start=start,
+            end=end,
+            path=path,
+            capture_slot=capture_slot,
+        )
+        next_state = board_state.capture_piece(captured.piece_id, capture_slot)
+        return MotionPlan(
+            move=move,
+            base_revision=board_state.revision,
+            captured_piece_id=captured.piece_id,
+            capture_slot=capture_slot,
+            transfers=(transfer,),
+            program=self._generator.generate((transfer,)),
+            next_state=next_state,
+        )
+
+    def plan_buffer_out(
+        self,
+        move: MoveDelta,
+        buffer_point: MachinePoint,
+        state: Optional[BoardState] = None,
+    ) -> MotionPlan:
+        board_state = state if state is not None else self.store.load()
+        if buffer_point not in self.config.capture.buffer_points:
+            raise PlanningError("castling buffer point is not configured")
+        if board_state.validate_move(move) is not None:
+            raise PlanningError("castling buffer transfer cannot capture")
+        start = grid_to_machine(move.previous, self.config.board)
+        obstacles = self._physical_obstacles(
+            board_state, exclude_piece_ids={move.piece_id}
+        )
+        path = plan_path(
+            start,
+            buffer_point,
+            obstacles,
+            self.config.workspace,
+            self.config.planner,
+        )
+        transfer = PieceTransfer(
+            piece_id=move.piece_id,
+            purpose="move",
+            start=start,
+            end=buffer_point,
+            path=path,
+        )
+        next_state = board_state.buffer_piece(
+            move.piece_id, buffer_point, move.event_id
+        )
+        return MotionPlan(
+            move=move,
+            base_revision=board_state.revision,
+            captured_piece_id=None,
+            capture_slot=None,
+            transfers=(transfer,),
+            program=self._generator.generate((transfer,)),
+            next_state=next_state,
+        )
+
+    def plan_buffer_in(
+        self,
+        move: MoveDelta,
+        destination: GridPosition,
+        state: Optional[BoardState] = None,
+    ) -> MotionPlan:
+        board_state = state if state is not None else self.store.load()
+        piece = board_state.pieces.get(move.piece_id)
+        if piece is None or piece.status != "buffered":
+            raise StateError(f"piece {move.piece_id!r} is not buffered")
+        assert piece.machine_x is not None and piece.machine_y is not None
+        start = MachinePoint(piece.machine_x, piece.machine_y)
+        end = grid_to_machine(destination, self.config.board)
+        obstacles = self._physical_obstacles(
+            board_state, exclude_piece_ids={move.piece_id}
+        )
+        path = plan_path(
+            start,
+            end,
+            obstacles,
+            self.config.workspace,
+            self.config.planner,
+        )
+        transfer = PieceTransfer(
+            piece_id=move.piece_id,
+            purpose="move",
+            start=start,
+            end=end,
+            path=path,
+        )
+        next_state = board_state.unbuffer_piece(
+            move.piece_id, destination, move.event_id
+        )
+        return MotionPlan(
+            move=move,
+            base_revision=board_state.revision,
+            captured_piece_id=None,
+            capture_slot=None,
+            transfers=(transfer,),
+            program=self._generator.generate((transfer,)),
+            next_state=next_state,
+        )
+
+    def execute_plan_with_link(self, plan: MotionPlan, link: Any) -> MotionPlan:
+        self._require_execution_unlocked()
+        if (
+            self.config.capture.mode == "eject"
+            and len(plan.transfers) > 1
+            and any(transfer.purpose == "capture" for transfer in plan.transfers)
+        ):
+            raise ConfigurationError(
+                "compound ejection plans must execute through execute_with_link"
+            )
+        if not getattr(link, "connected", False):
+            raise ConfigurationError(
+                "cannot execute: the supplied Marlin link is not connected"
+            )
+        with self.store.locked():
+            if self.journal.exists():
+                raise PendingTransactionError(
+                    f"pending transaction exists at {self.journal.path}; inspect and reconcile it first"
+                )
+            current = self.store.load()
+            if current.revision != plan.base_revision:
+                raise StateError(
+                    f"custom plan revision {plan.base_revision} does not match current {current.revision}"
+                )
+            self.journal.create(plan.journal_payload())
+            self.audit.append({"status": "prepared", **plan.summary()})
+            try:
+                self._stream_plan(plan, link)
+                return self._complete_transaction(plan)
+            except Exception as exc:
+                self._fail_transaction(plan, exc)
+                raise
 
     def commit_observed_moves(self, moves: tuple[MoveDelta, ...]) -> BoardState:
         if not moves:
@@ -297,16 +481,9 @@ class GantryService:
 
     def execute(self, move: MoveDelta) -> MotionPlan:
         self._require_execution_unlocked()
-        with self.store.locked():
-            plan = self._prepare_transaction(move)
-            try:
-                link = self._link_factory(self.config.serial)
-                with link:
-                    self._stream_plan(plan, link)
-                return self._complete_transaction(plan)
-            except Exception as exc:
-                self._fail_transaction(plan, exc)
-                raise
+        link = self._link_factory(self.config.serial)
+        with link:
+            return self.execute_with_link(move, link)
 
     def execute_with_link(self, move: MoveDelta, link: Any) -> MotionPlan:
         self._require_execution_unlocked()
@@ -314,6 +491,19 @@ class GantryService:
             raise ConfigurationError(
                 "cannot execute: the supplied Marlin link is not connected"
             )
+        state = self.store.load()
+        if self.config.capture.mode == "eject" and move.capture is not None:
+            captured = state.pieces.get(move.capture.piece_id)
+            if (
+                captured is not None
+                and captured.status == "captured"
+                and state.piece_at(move.capture.position) is None
+            ):
+                move = replace(move, capture=None)
+            elif state.validate_move(move) is not None:
+                ejection = self.plan_capture_ejection(move, state)
+                self.execute_plan_with_link(ejection, link)
+                move = replace(move, capture=None)
         with self.store.locked():
             plan = self._prepare_transaction(move)
             try:

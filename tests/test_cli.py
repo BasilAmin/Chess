@@ -102,6 +102,7 @@ class RunCommandTests(unittest.TestCase):
                 "--execute",
                 "--demo",
                 "--confirm-high-speed",
+                "--confirm-capture-chutes",
                 "--unicode",
                 "--no-screen",
             ]
@@ -110,6 +111,7 @@ class RunCommandTests(unittest.TestCase):
         self.assertTrue(args.execute)
         self.assertTrue(args.demo)
         self.assertTrue(args.confirm_high_speed)
+        self.assertTrue(args.confirm_capture_chutes)
         self.assertTrue(args.unicode)
         self.assertTrue(args.no_screen)
 

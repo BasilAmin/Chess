@@ -307,7 +307,10 @@ class GameCoordinator:
             assert self._service is not None
             event = f"{self._game_id or 'local'}.{self._board.ply() + 1}.camera"
             deltas = chess_move_deltas(
-                self._board, move, self._service.store.load(), event
+                self._board,
+                move,
+                self._service.store.load(),
+                event,
             )
             self._service.commit_observed_moves(deltas)
             san = self._board.san(move)
@@ -383,7 +386,12 @@ class GameCoordinator:
             )
         event = f"{self._game_id or self._mode}.{self._board.ply() + 1}.{actor}"
         notation = san or self._board.san(move)
-        deltas = chess_move_deltas(self._board, move, self._service.store.load(), event)
+        deltas = chess_move_deltas(
+            self._board,
+            move,
+            self._service.store.load(),
+            event,
+        )
         self._state = "executing"
         self.vision.pause_inference(True)
         for delta in deltas:

@@ -32,20 +32,20 @@ flowchart LR
 
 ## Current Capabilities
 
-| Capability              | Status                                                      |
-| ----------------------- | ----------------------------------------------------------- |
-| Phone camera            | `auto:http://192.168.100.88:8080`                           |
-| Fast recognition        | Local OpenCV ArUco + six calibrated cap colors              |
-| Fallback recognition    | OpenAI `gpt-5.6-sol` structured visual audit                |
-| Move validation         | Three local frames and exactly one legal successor          |
-| Local two-player game   | Both people move pieces; local OpenCV registers each move   |
-| Human versus Lichess/AI | Camera submits the local side; gantry executes remote side  |
-| Two-AI physical mirror  | Gantry executes both sides from a fresh Lichess game        |
-| Normal physical moves   | Supported with Marlin acknowledgements and local journaling |
-| Castling                | King and rook transfers supported                           |
-| Human captures          | Supported because the human removes the captured piece      |
-| Remote gantry captures  | Blocked until capture storage coordinates are calibrated    |
-| Promotion               | Blocked for physical replacement confirmation               |
+| Capability              | Status                                                          |
+| ----------------------- | --------------------------------------------------------------- |
+| Phone camera            | `auto:http://192.168.100.88:8080`                               |
+| Fast recognition        | Local OpenCV ArUco + six calibrated cap colors                  |
+| Fallback recognition    | OpenAI `gpt-5.6-sol` structured visual audit                    |
+| Move validation         | Three local frames and exactly one legal successor              |
+| Local two-player game   | Both people move pieces; local OpenCV registers each move       |
+| Human versus Lichess/AI | Camera submits the local side; gantry executes remote side      |
+| Two-AI physical mirror  | Gantry executes both sides from a fresh Lichess game            |
+| Normal physical moves   | Supported with Marlin acknowledgements and local journaling     |
+| Castling                | King and rook transfers supported                               |
+| Human captures          | Supported because the human removes the captured piece          |
+| Remote gantry captures  | Captured piece is carried to the nearest calibrated edge chute  |
+| Promotion               | Mirror/arena use a pawn proxy; camera games require replacement |
 
 Reed switches and MCP23017 are no longer in the runtime path. Fast move
 recognition uses four ArUco board references plus calibrated color caps, with Sol
@@ -400,13 +400,9 @@ For a fresh public Lichess game with zero moves:
 ./scripts/mirror_lichess.sh GAME_ID
 ```
 
-The script asks for:
-
-```text
-MIRROR BOARD READY
-```
-
-It then:
+The script asks for the exact confirmation `MIRROR BOARD AND CHUTES READY`, which
+confirms the standard board, installed collection tray, clear X0 chutes, and
+clear X10 castling buffers. It then:
 
 - initializes isolated state under `data/lichess-mirror/GAME_ID/physical/`;
 - rejects games that already contain moves;
@@ -467,9 +463,12 @@ Board API game with an authorized `LICHESS_TOKEN`, use:
 ./scripts/mirror_lichess.sh GAME_ID --stream-mode board
 ```
 
-Captures stop safely while physical capture storage is disabled. Promotions
-stop for verified piece replacement. Castling executes king and rook as ordered
-sub-transfers and advances the ply cursor only after both complete.
+Captures are carried to the nearest edge chute and released beyond the playing
+area. En passant removes the pawn from its actual capture square. Castling uses
+three persisted physical stages: rook to buffer, king to destination, rook from
+buffer to destination. Promotion keeps the pawn as the physical proxy while the
+virtual board tracks its promoted type. The cursor advances only after every
+physical stage completes.
 
 ### Physical Claude Vs ChatGPT
 
@@ -500,10 +499,10 @@ for a move from a server-generated legal UCI allowlist, validates it, and
 executes normal moves physically. The board, SAN score, provider, rationale,
 plan, latency, FEN, check state, and result update live.
 
-Captures and promotions pause for operator assistance because automatic capture
-storage and promotion replacement are not calibrated. Perform the requested
-physical move, type `AI MOVE COMPLETED`, and press **Confirm physical move**.
-The persistent physical state is committed before either provider continues.
+Captures use the calibrated edge chute, en passant ejects the pawn from its
+actual square, and castling uses the temporary edge buffer. On promotion, the
+pawn remains the physical proxy while the virtual board tracks its promoted
+type, allowing the game to continue without an off-board reserve set.
 
 Claude requires `ANTHROPIC_API_KEY`; the OpenAI key cannot authenticate to
 Anthropic. Without it, the GUI displays the missing provider and disables Start.
@@ -679,10 +678,18 @@ locally before images are sent to Sol.
 | Nearest-home square        | h1             |
 | Homed host reference       | `X2 Y298 Z328` |
 
-Physical captures by the gantry remain disabled because no safe off-board
-storage coordinates are calibrated. This is a mechanical limitation, not a
-vision limitation. Remote captures stop safely instead of dragging a captured
-piece into an unknown location.
+Physical capture ejection is configured in `config.json`:
+
+```text
+edge chutes: X0 Y0 and X0 Y300
+castle buffers: X10 Y0 and X10 Y300
+```
+
+Install a collection tray or open drop area beyond the X0 edge before running a
+game. The gantry carries the captured piece to the nearest chute and releases
+the magnet; it does not launch pieces with uncontrolled acceleration. Keep the
+chute and buffer strip clear. If your physical board support does not leave the
+piece center beyond the edge at X0, recalibrate these coordinates before use.
 
 ## Emergency Stop
 

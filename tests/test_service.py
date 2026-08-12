@@ -16,12 +16,24 @@ from chess_gantry.service import GantryService
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_config(*, calibrated: bool = True, capture: bool = False) -> AppConfig:
+def test_config(
+    *, calibrated: bool = True, capture: bool = False, eject: bool = False
+) -> AppConfig:
     raw = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
     raw["planner"]["kind"] = "direct"
     raw["capture"]["enabled"] = capture
     if capture:
-        raw["capture"]["slots"] = [[5.0, 5.0], [5.0, 25.0]]
+        if eject:
+            raw["capture"] = {
+                "enabled": True,
+                "mode": "eject",
+                "slots": [],
+                "eject_points": [[0.0, 0.0], [0.0, 300.0]],
+                "buffer_points": [[10.0, 0.0], [10.0, 300.0]],
+            }
+        else:
+            raw["capture"]["mode"] = "slots"
+            raw["capture"]["slots"] = [[5.0, 5.0], [5.0, 25.0]]
     raw["safety"]["calibrated"] = calibrated
     raw["safety"]["home_before_execute"] = False
     raw["safety"]["preflight_commands"] = []
@@ -302,6 +314,142 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(plan.transfers[0].start.y, 138.0)
             self.assertEqual(plan.transfers[1].end.x, 160.0)
             self.assertEqual(plan.transfers[1].end.y, 98.0)
+
+    def test_eject_capture_moves_piece_to_nearest_edge_and_removes_obstacle(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            temp = Path(directory)
+            state_path, journal_path, audit_path = self.paths(temp)
+            atomic_write_json(state_path, self.capture_state().to_dict())
+            service = GantryService(
+                test_config(capture=True, eject=True),
+                state_path,
+                journal_path,
+                audit_path,
+            )
+            move = MoveDelta.from_mapping(
+                {"position": "white_pawn_e", "px": 4, "py": 3, "nx": 3, "ny": 4}
+            )
+            plan = service.plan(move)
+            capture = plan.transfers[0]
+            self.assertEqual(capture.purpose, "capture")
+            self.assertEqual(capture.end.x, 0.0)
+            self.assertIn(capture.end.y, {0.0, 300.0})
+            self.assertEqual(plan.next_state.pieces["black_pawn_d"].status, "captured")
+            self.assertNotIn(
+                capture.end,
+                service._physical_obstacles(plan.next_state),
+            )
+            commands = plan.program.commands
+            edge_move_index = next(
+                index
+                for index, command in enumerate(commands)
+                if command.startswith("G1 ")
+                and "Z0" in command
+                and ("Y0" in command or "Y300" in command)
+            )
+            self.assertIn(
+                f"F{service.config.motion.drag_feed_mm_min:g}",
+                commands[edge_move_index],
+            )
+            self.assertIn("M107 P0", commands[edge_move_index + 1 :])
+
+    def test_ejection_commits_before_attacker_move_and_recovers_independently(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            temp = Path(directory)
+            state_path, journal_path, audit_path = self.paths(temp)
+            atomic_write_json(state_path, self.capture_state().to_dict())
+            service = GantryService(
+                test_config(capture=True, eject=True),
+                state_path,
+                journal_path,
+                audit_path,
+            )
+            move = MoveDelta.from_mapping(
+                {
+                    "position": "white_pawn_e",
+                    "px": 4,
+                    "py": 3,
+                    "nx": 3,
+                    "ny": 4,
+                    "capture": {"id": "black_pawn_d", "x": 3, "y": 4},
+                    "event_id": "capture.recovery",
+                }
+            )
+
+            class FailSecondProgram(FakeLink):
+                def send_program(self, commands):
+                    commands = tuple(commands)
+                    self.programs.append(commands)
+                    if len(self.programs) == 2:
+                        raise SerialProtocolError("attacker transfer interrupted")
+                    return ()
+
+            link = FailSecondProgram()
+            with self.assertRaisesRegex(SerialProtocolError, "attacker transfer"):
+                service.execute_with_link(move, link)
+            persisted = service.store.load()
+            self.assertEqual(persisted.pieces["black_pawn_d"].status, "captured")
+            self.assertEqual(
+                persisted.pieces["white_pawn_e"].board_position,
+                GridPosition(4, 3),
+            )
+            service.reconcile_discard()
+            persisted = service.store.load()
+            self.assertEqual(persisted.pieces["black_pawn_d"].status, "captured")
+            self.assertEqual(
+                persisted.pieces["white_pawn_e"].board_position,
+                GridPosition(4, 3),
+            )
+            service.execute_with_link(move, FakeLink())
+            persisted = service.store.load()
+            self.assertEqual(
+                persisted.pieces["white_pawn_e"].board_position,
+                GridPosition(3, 4),
+            )
+
+    def test_castling_buffer_plans_out_and_back_with_persisted_state(self) -> None:
+        with TemporaryDirectory() as directory:
+            temp = Path(directory)
+            state_path, journal_path, audit_path = self.paths(temp)
+            state = BoardState.standard()
+            pieces = dict(state.pieces)
+            pieces.pop("white_knight_g")
+            pieces.pop("white_bishop_f")
+            state = BoardState(state.schema_version, state.revision, pieces)
+            atomic_write_json(state_path, state.to_dict())
+            service = GantryService(
+                test_config(capture=True, eject=True),
+                state_path,
+                journal_path,
+                audit_path,
+            )
+            rook_move = MoveDelta.from_mapping(
+                {
+                    "position": "white_rook_h",
+                    "px": 7,
+                    "py": 0,
+                    "nx": 5,
+                    "ny": 0,
+                    "event_id": "castle.rook",
+                }
+            )
+            buffer = service.config.capture.buffer_points[1]
+            out = service.plan_buffer_out(rook_move, buffer)
+            self.assertEqual(out.transfers[0].end, buffer)
+            self.assertEqual(out.next_state.pieces["white_rook_h"].status, "buffered")
+            service.store.save(out.next_state)
+            back = service.plan_buffer_in(
+                rook_move, GridPosition(5, 0), service.store.load()
+            )
+            self.assertEqual(back.transfers[0].start, buffer)
+            self.assertEqual(
+                back.next_state.pieces["white_rook_h"].board_position,
+                GridPosition(5, 0),
+            )
 
     def test_successful_execute_commits_state_and_clears_journal(self) -> None:
         with TemporaryDirectory() as directory:

@@ -13,6 +13,7 @@ from .config import AppConfig
 from .errors import ConfigurationError, ValidationError
 from .lichess_pgn import chess_move_deltas, fetch_pgn, lichess_client
 from .models import BoardState
+from .kinematics import grid_to_machine
 from .persistence import atomic_write_json, read_json, utc_now
 from .serial_link import DemoMarlinSerial, MarlinSerial
 from .service import GantryService
@@ -165,6 +166,10 @@ class LichessMirror:
             raise ValidationError("Lichess game ID must be 8-12 letters or digits")
         if stream_mode not in {"auto", "public", "board"}:
             raise ValidationError("stream mode must be auto, public, or board")
+        if not config.capture.buffer_points:
+            raise ConfigurationError(
+                "Lichess mirror requires at least one castling buffer point"
+            )
         self.game_id = game_id
         self.config = mirror_config(config, fast=fast)
         self.root = root
@@ -283,7 +288,13 @@ class LichessMirror:
         state = BoardState.standard()
         for ply, uci in enumerate(cursor.moves, 1):
             move = board.parse_uci(uci)
-            deltas = chess_move_deltas(board, move, state, f"rebuild.{ply}")
+            deltas = chess_move_deltas(
+                board,
+                move,
+                state,
+                f"rebuild.{ply}",
+                allow_promotion_replacement=True,
+            )
             for delta in deltas:
                 captured = state.validate_move(delta)
                 capture_slot = None
@@ -303,6 +314,8 @@ class LichessMirror:
         move = chess.Move.from_uci(uci)
         if move not in board.legal_moves:
             raise ValidationError(f"Lichess move {uci} is illegal in mirror state")
+        if board.is_castling(move):
+            return self._execute_buffered_castling(cursor, board, move)
         if board.is_capture(move) and not self.config.capture.enabled:
             raise ConfigurationError(
                 f"Lichess move {uci} is a capture, but physical capture storage is disabled"
@@ -317,7 +330,10 @@ class LichessMirror:
             move,
             delta_state,
             f"{self.game_id}.{len(cursor.moves) + 1}",
+            allow_promotion_replacement=True,
         )
+        if board.is_capture(move) and self.config.capture.mode == "eject":
+            return self._execute_ejection_capture(cursor, board, move, deltas[0])
         if cursor.pending_uci and cursor.pending_uci != uci:
             raise ConfigurationError("mirror cursor has another pending physical ply")
         if not cursor.pending_uci:
@@ -348,6 +364,123 @@ class LichessMirror:
         cursor = replace(
             cursor,
             moves=cursor.moves + (uci,),
+            fen=board.fen(),
+            pending_uci=None,
+            pending_total=0,
+            pending_completed=0,
+        )
+        cursor.save(self.cursor_path)
+        return cursor
+
+    def _execute_ejection_capture(
+        self,
+        cursor: MirrorCursor,
+        board: Any,
+        move: Any,
+        delta: Any,
+    ) -> MirrorCursor:
+        if cursor.pending_uci and cursor.pending_uci != move.uci():
+            raise ConfigurationError("mirror cursor has another pending physical ply")
+        if not cursor.pending_uci:
+            cursor = replace(
+                cursor,
+                pending_uci=move.uci(),
+                pending_total=2,
+                pending_completed=0,
+            )
+            cursor.save(self.cursor_path)
+        cursor = self._recover_reconciled_submove(cursor)
+        stages = (
+            lambda: self.service.plan_capture_ejection(delta),
+            lambda: self.service.plan(replace(delta, capture=None)),
+        )
+        for index in range(cursor.pending_completed, 2):
+            self._apply_plan(stages[index]())
+            cursor = replace(
+                cursor,
+                physical_revision=self.service.store.load().revision,
+                pending_completed=index + 1,
+            )
+            cursor.save(self.cursor_path)
+        board.push(move)
+        cursor = replace(
+            cursor,
+            moves=cursor.moves + (move.uci(),),
+            fen=board.fen(),
+            pending_uci=None,
+            pending_total=0,
+            pending_completed=0,
+        )
+        cursor.save(self.cursor_path)
+        return cursor
+
+    def _apply_plan(self, plan: Any) -> None:
+        if self.execute:
+            assert self.link is not None
+            self.service.execute_plan_with_link(plan, self.link)
+        else:
+            self.service.store.save(plan.next_state)
+
+    def _execute_buffered_castling(
+        self, cursor: MirrorCursor, board: Any, move: Any
+    ) -> MirrorCursor:
+        deltas = chess_move_deltas(
+            board,
+            move,
+            (
+                self._state_before_pending_ply(cursor)
+                if cursor.pending_uci
+                else self.service.store.load()
+            ),
+            f"{self.game_id}.{len(cursor.moves) + 1}",
+        )
+        if len(deltas) != 2 or not self.config.capture.buffer_points:
+            raise ConfigurationError(
+                "castling requires king/rook deltas and a buffer point"
+            )
+        king_delta, rook_delta = deltas
+        rook_start = grid_to_machine(rook_delta.previous, self.config.board)
+        buffer_point = min(
+            self.config.capture.buffer_points,
+            key=lambda point: (
+                (point.x - rook_start.x) ** 2 + (point.y - rook_start.y) ** 2
+            ),
+        )
+        if cursor.pending_uci and cursor.pending_uci != move.uci():
+            raise ConfigurationError("mirror cursor has another pending physical ply")
+        if not cursor.pending_uci:
+            cursor = replace(
+                cursor,
+                pending_uci=move.uci(),
+                pending_total=3,
+                pending_completed=0,
+            )
+            cursor.save(self.cursor_path)
+        cursor = self._recover_reconciled_submove(cursor)
+        stages = (
+            lambda: self.service.plan_buffer_out(
+                replace(rook_delta, event_id=f"{rook_delta.event_id}.buffer-out"),
+                buffer_point,
+            ),
+            lambda: self.service.plan(king_delta),
+            lambda: self.service.plan_buffer_in(
+                replace(rook_delta, event_id=f"{rook_delta.event_id}.buffer-in"),
+                rook_delta.new,
+            ),
+        )
+        for index in range(cursor.pending_completed, 3):
+            plan = stages[index]()
+            self._apply_plan(plan)
+            cursor = replace(
+                cursor,
+                physical_revision=self.service.store.load().revision,
+                pending_completed=index + 1,
+            )
+            cursor.save(self.cursor_path)
+        board.push(move)
+        cursor = replace(
+            cursor,
+            moves=cursor.moves + (move.uci(),),
             fen=board.fen(),
             pending_uci=None,
             pending_total=0,

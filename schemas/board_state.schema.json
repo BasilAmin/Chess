@@ -5,8 +5,28 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "revision", "pieces", "processed_events"],
+  "allOf": [
+    {
+      "if": {
+        "properties": { "schema_version": { "const": 1 } },
+        "required": ["schema_version"]
+      },
+      "then": {
+        "properties": {
+          "pieces": {
+            "additionalProperties": {
+              "not": {
+                "properties": { "status": { "const": "buffered" } },
+                "required": ["status"]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "enum": [1, 2] },
     "revision": { "type": "integer", "minimum": 0 },
     "processed_events": {
       "type": "array",
@@ -37,6 +57,19 @@
               "x": { "type": "null" },
               "y": { "type": "null" },
               "capture_slot": { "type": "integer", "minimum": 0 },
+              "metadata": { "type": "object" }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status", "x", "y", "machine_x", "machine_y"],
+            "properties": {
+              "status": { "const": "buffered" },
+              "x": { "type": "null" },
+              "y": { "type": "null" },
+              "machine_x": { "type": "number" },
+              "machine_y": { "type": "number" },
               "metadata": { "type": "object" }
             }
           }

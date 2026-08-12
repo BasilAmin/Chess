@@ -42,14 +42,15 @@ if [[ " ${*:-} " == *" --demo "* ]]; then
     lichess-mirror "$GAME_ID" --execute --demo --confirm-high-speed "$@"
 fi
 
-printf 'This will home the physical gantry and mirror a fresh zero-move Lichess game.\n'
+printf 'This will home the gantry and use the X0 capture chutes and X10 castling buffers.\n'
+printf 'Install the collection tray and clear both chute and buffer paths before continuing.\n'
 if [[ " ${*:-} " == *" --configured-speed "* ]]; then
   printf 'Motion profile: calibrated feeds from config.json.\n'
 else
   printf 'Fast profile: travel 12000 mm/min, drag 3000 mm/min.\n'
 fi
-read -r -p 'Type MIRROR BOARD READY to continue: ' confirmation
-if [[ "$confirmation" != "MIRROR BOARD READY" ]]; then
+read -r -p 'Type MIRROR BOARD AND CHUTES READY to continue: ' confirmation
+if [[ "$confirmation" != "MIRROR BOARD AND CHUTES READY" ]]; then
   printf 'Confirmation did not match; nothing moved.\n' >&2
   exit 2
 fi
@@ -60,5 +61,6 @@ exec uv run chess-gantry --config config.json \
   --confirm-motion \
   --confirm-standard-position \
   --confirm-clear-path \
+  --confirm-capture-chutes \
   --confirm-high-speed \
   "$@"

@@ -49,6 +49,39 @@ class ConfigAndGCodeTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "duplicates"):
             AppConfig.from_mapping(raw)
 
+    def test_eject_capture_requires_edge_and_buffer_points(self) -> None:
+        raw = self.raw_config()
+        raw["capture"] = {
+            "enabled": True,
+            "mode": "eject",
+            "slots": [],
+            "eject_points": [],
+            "buffer_points": [[10.0, 0.0]],
+        }
+        with self.assertRaisesRegex(ConfigurationError, "eject point"):
+            AppConfig.from_mapping(raw)
+        raw["capture"]["eject_points"] = [[0.0, 0.0]]
+        raw["capture"]["buffer_points"] = []
+        with self.assertRaisesRegex(ConfigurationError, "buffer point"):
+            AppConfig.from_mapping(raw)
+
+    def test_eject_and_buffer_points_must_be_outside_board_and_inside_workspace(
+        self,
+    ) -> None:
+        raw = self.raw_config()
+        raw["capture"] = {
+            "enabled": True,
+            "mode": "eject",
+            "slots": [],
+            "eject_points": [[999.0, 0.0]],
+            "buffer_points": [[10.0, 0.0]],
+        }
+        with self.assertRaisesRegex(ConfigurationError, "outside the workspace"):
+            AppConfig.from_mapping(raw)
+        raw["capture"]["eject_points"] = [[40.0, 40.0]]
+        with self.assertRaisesRegex(ConfigurationError, "playing-board footprint"):
+            AppConfig.from_mapping(raw)
+
     def test_gcode_waits_before_magnet_transitions(self) -> None:
         raw = self.raw_config()
         raw["motion"]["park_after_move"] = False

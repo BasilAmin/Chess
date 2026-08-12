@@ -213,6 +213,11 @@ def _parser() -> ArgumentParser:
         help="required confirmation that homing and board paths are clear",
     )
     mirror.add_argument(
+        "--confirm-capture-chutes",
+        action="store_true",
+        help="required confirmation that both edge chutes, tray, and castling buffers are clear",
+    )
+    mirror.add_argument(
         "--confirm-high-speed",
         action="store_true",
         help="required for the fast 12000/3000 mm/min profile",
@@ -1108,6 +1113,10 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                 if not args.confirm_clear_path:
                     parser.error(
                         "physical lichess-mirror requires --confirm-clear-path"
+                    )
+                if not args.confirm_capture_chutes:
+                    parser.error(
+                        "physical lichess-mirror requires --confirm-capture-chutes"
                     )
             if (
                 not args.configured_speed

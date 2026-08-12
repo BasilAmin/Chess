@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from dataclasses import replace
 import json
 import unittest
 
@@ -10,6 +11,8 @@ import chess
 
 from chess_gantry.config import AppConfig
 from chess_gantry.errors import ConfigurationError
+from chess_gantry.models import GridPosition
+from chess_gantry.serial_link import DemoMarlinSerial
 from chess_gantry.lichess_mirror import (
     FAST_DRAG_MM_MIN,
     FAST_TRAVEL_MM_MIN,
@@ -95,6 +98,12 @@ class MirrorTests(unittest.TestCase):
             **kwargs,
         )
 
+    def activate_demo_link(self, session):
+        session.link = DemoMarlinSerial(session.config.serial)
+        session.link.connect()
+        session.service.home_with_link(session.link)
+        self.addCleanup(session.link.close)
+
     def test_fast_profile_disables_parking_and_uses_commissioned_ceiling(self):
         value = mirror_config(self.config, fast=True)
         self.assertFalse(value.motion.park_after_move)
@@ -157,6 +166,23 @@ class MirrorTests(unittest.TestCase):
             session._initialize()
         self.assertIn("sentinel", session.state_path.read_text())
 
+    def test_mirror_requires_configured_castling_buffer(self):
+        config = replace(
+            self.config,
+            capture=replace(self.config.capture, buffer_points=()),
+        )
+        with self.assertRaisesRegex(ConfigurationError, "castling buffer"):
+            LichessMirror(
+                game_id="game1234",
+                config=config,
+                root=self.root,
+                execute=False,
+                demo=False,
+                fast=False,
+                client=FakeClient(()),
+                pgn_fetcher=lambda *args, **kwargs: pgn(),
+            )
+
     def test_duplicate_stream_state_does_not_duplicate_execution(self):
         events = [
             {"type": "gameState", "moves": "e2e4", "status": "started"},
@@ -181,14 +207,83 @@ class MirrorTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "backlog"):
             session._verify_prefix(fresh, ("e2e4", "e7e5"))
 
-    def test_capture_stops_before_motion_when_storage_is_disabled(self):
+    def test_capture_ejects_piece_and_continues(self):
+        session = self.session(execute=False)
+        cursor = session._initialize()
+        for uci in ("e2e4", "d7d5", "e4d5"):
+            cursor = session._execute_ply(cursor, uci)
+        self.assertEqual(cursor.moves, ("e2e4", "d7d5", "e4d5"))
+        state = session.service.store.load()
+        self.assertEqual(state.pieces["black_pawn_d"].status, "captured")
+        self.assertEqual(state.pieces["white_pawn_e"].board_position.x, 3)
+        self.assertEqual(state.pieces["white_pawn_e"].board_position.y, 4)
+
+    def test_capture_resumes_after_persisted_ejection_without_replaying(self):
+        from chess_gantry.lichess_pgn import chess_move_deltas
+
         session = self.session(execute=False)
         cursor = session._initialize()
         for uci in ("e2e4", "d7d5"):
             cursor = session._execute_ply(cursor, uci)
-        with self.assertRaisesRegex(ConfigurationError, "capture storage"):
-            session._execute_ply(cursor, "e4d5")
-        self.assertEqual(cursor.moves, ("e2e4", "d7d5"))
+        board = session._board(cursor)
+        move = board.parse_uci("e4d5")
+        (delta,) = chess_move_deltas(
+            board,
+            move,
+            session.service.store.load(),
+            "game1234.3",
+            allow_promotion_replacement=True,
+        )
+        session._apply_plan(session.service.plan_capture_ejection(delta))
+        cursor = replace(
+            cursor,
+            pending_uci="e4d5",
+            pending_total=2,
+            pending_completed=1,
+            physical_revision=session.service.store.load().revision,
+        )
+        cursor.save(session.cursor_path)
+        completed = session._execute_ply(session._initialize(), "e4d5")
+        self.assertEqual(completed.moves[-1], "e4d5")
+        state = session.service.store.load()
+        self.assertEqual(state.pieces["black_pawn_d"].status, "captured")
+        self.assertEqual(
+            state.pieces["white_pawn_e"].board_position, GridPosition(3, 4)
+        )
+
+    def test_en_passant_ejects_pawn_from_actual_capture_square(self):
+        session = self.session(execute=False)
+        cursor = session._initialize()
+        sequence = ("e2e4", "a7a6", "e4e5", "d7d5", "e5d6")
+        for uci in sequence:
+            cursor = session._execute_ply(cursor, uci)
+        state = session.service.store.load()
+        self.assertEqual(state.pieces["black_pawn_d"].status, "captured")
+        self.assertEqual(state.pieces["white_pawn_e"].board_position.x, 3)
+        self.assertEqual(state.pieces["white_pawn_e"].board_position.y, 5)
+        self.assertEqual(cursor.moves, sequence)
+
+    def test_promotion_uses_pawn_proxy_and_continues_virtual_queen_state(self):
+        session = self.session(execute=False)
+        cursor = session._initialize()
+        sequence = (
+            "a2a4",
+            "h7h5",
+            "a4a5",
+            "h5h4",
+            "a5a6",
+            "h4h3",
+            "a6b7",
+            "h3g2",
+            "b7a8q",
+        )
+        for uci in sequence:
+            cursor = session._execute_ply(cursor, uci)
+        board = session._board(cursor)
+        self.assertEqual(board.piece_at(chess.A8).symbol(), "Q")
+        state = session.service.store.load()
+        self.assertEqual(state.pieces["white_pawn_a"].board_position.x, 0)
+        self.assertEqual(state.pieces["white_pawn_a"].board_position.y, 7)
 
     def test_castling_advances_cursor_after_both_physical_transfers(self):
         session = self.session(execute=False)
@@ -199,11 +294,125 @@ class MirrorTests(unittest.TestCase):
         before_revision = cursor.physical_revision
         cursor = session._execute_ply(cursor, "e1g1")
         self.assertEqual(cursor.moves[-1], "e1g1")
-        self.assertEqual(cursor.physical_revision, before_revision + 2)
+        self.assertEqual(cursor.physical_revision, before_revision + 3)
         self.assertIsNone(cursor.pending_uci)
         state = session.service.store.load()
         self.assertEqual(state.pieces["white_king_e"].x, 6)
         self.assertEqual(state.pieces["white_rook_h"].x, 5)
+
+    def test_buffered_castling_resumes_after_first_stage_without_replaying(self):
+        from chess_gantry.kinematics import grid_to_machine
+        from chess_gantry.lichess_pgn import chess_move_deltas
+
+        session = self.session(execute=False)
+        cursor = session._initialize()
+        sequence = ("e2e4", "e7e5", "g1f3", "b8c6", "f1e2", "g8f6")
+        for uci in sequence:
+            cursor = session._execute_ply(cursor, uci)
+        board = session._board(cursor)
+        castle = board.parse_uci("e1g1")
+        _, rook_delta = chess_move_deltas(
+            board,
+            castle,
+            session.service.store.load(),
+            "game1234.7",
+        )
+        rook_start = grid_to_machine(rook_delta.previous, session.config.board)
+        buffer = min(
+            session.config.capture.buffer_points,
+            key=lambda point: (point.x - rook_start.x) ** 2
+            + (point.y - rook_start.y) ** 2,
+        )
+        plan = session.service.plan_buffer_out(rook_delta, buffer)
+        session._apply_plan(plan)
+        cursor = replace(
+            cursor,
+            pending_uci="e1g1",
+            pending_total=3,
+            pending_completed=1,
+            physical_revision=session.service.store.load().revision,
+        )
+        cursor.save(session.cursor_path)
+        resumed = session._initialize()
+        completed = session._execute_ply(resumed, "e1g1")
+        self.assertEqual(completed.moves[-1], "e1g1")
+        self.assertIsNone(completed.pending_uci)
+        self.assertEqual(completed.pending_completed, 0)
+        state = session.service.store.load()
+        self.assertEqual(
+            state.pieces["white_king_e"].board_position, GridPosition(6, 0)
+        )
+        self.assertEqual(
+            state.pieces["white_rook_h"].board_position, GridPosition(5, 0)
+        )
+
+    def test_complete_checkmate_game_with_capture_is_fully_mirrored(self):
+        session = self.session(execute=True, demo=True)
+        self.activate_demo_link(session)
+        cursor = session._initialize()
+        sequence = ("e2e4", "e7e5", "f1c4", "b8c6", "d1h5", "g8f6", "h5f7")
+        for uci in sequence:
+            cursor = session._execute_ply(cursor, uci)
+        board = session._board(cursor)
+        self.assertTrue(board.is_checkmate())
+        self.assertEqual(board.result(), "1-0")
+        self.assertEqual(cursor.moves, sequence)
+        state = session.service.store.load()
+        self.assertEqual(state.pieces["black_pawn_f"].status, "captured")
+
+    def test_special_moves_stream_actual_programs_through_demo_marlin(self):
+        sequences = {
+            "en-passant": ("e2e4", "a7a6", "e4e5", "d7d5", "e5d6"),
+            "castling": (
+                "e2e4",
+                "e7e5",
+                "g1f3",
+                "b8c6",
+                "f1e2",
+                "g8f6",
+                "e1g1",
+            ),
+            "promotion": (
+                "a2a4",
+                "h7h5",
+                "a4a5",
+                "h5h4",
+                "a5a6",
+                "h4h3",
+                "a6b7",
+                "h3g2",
+                "b7a8q",
+            ),
+        }
+        for name, sequence in sequences.items():
+            with self.subTest(name=name), TemporaryDirectory() as directory:
+                root = Path(directory)
+                session = LichessMirror(
+                    game_id="game1234",
+                    config=self.config,
+                    root=root,
+                    execute=True,
+                    demo=True,
+                    fast=True,
+                    stream_mode="board",
+                    terminal=MirrorTerminal(StringIO(), screen=False),
+                    client=FakeClient(()),
+                    pgn_fetcher=lambda *args, **kwargs: pgn(),
+                    sleep=lambda value: None,
+                )
+                session.link = DemoMarlinSerial(session.config.serial)
+                session.link.connect()
+                session.service.home_with_link(session.link)
+                try:
+                    cursor = session._initialize()
+                    for uci in sequence:
+                        cursor = session._execute_ply(cursor, uci)
+                    self.assertEqual(cursor.moves, sequence)
+                    self.assertGreater(len(session.link.commands), len(sequence))
+                    self.assertIn("M106 P0 S255", session.link.commands)
+                    self.assertIn("M107 P0", session.link.commands)
+                finally:
+                    session.link.close()
 
     def test_resume_uses_exact_cursor_without_replaying_move(self):
         first = self.session([{"type": "gameState", "moves": "e2e4", "status": "mate"}])

@@ -380,11 +380,21 @@ class PlannerSettings:
 class CaptureSettings:
     enabled: bool
     slots: Tuple[MachinePoint, ...]
+    mode: str
+    eject_points: Tuple[MachinePoint, ...]
+    buffer_points: Tuple[MachinePoint, ...]
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "CaptureSettings":
-        _unknown(raw, {"enabled", "slots"}, "capture")
+        _unknown(
+            raw,
+            {"enabled", "slots", "mode", "eject_points", "buffer_points"},
+            "capture",
+        )
         enabled = _boolean(raw.get("enabled", False), "capture.enabled")
+        mode = _string(raw.get("mode", "slots"), "capture.mode").lower()
+        if mode not in {"slots", "eject"}:
+            raise ConfigurationError("capture.mode must be 'slots' or 'eject'")
         raw_slots = raw.get("slots", [])
         if not isinstance(raw_slots, list):
             raise ConfigurationError("capture.slots must be an array of [x_mm, y_mm]")
@@ -398,11 +408,48 @@ class CaptureSettings:
                     _number(item[1], f"capture.slots[{index}][1]"),
                 )
             )
-        if enabled and not slots:
+
+        def points(name: str) -> Tuple[MachinePoint, ...]:
+            value = raw.get(name, [])
+            if not isinstance(value, list):
+                raise ConfigurationError(
+                    f"capture.{name} must be an array of [x_mm, y_mm]"
+                )
+            result = []
+            for index, item in enumerate(value):
+                if not isinstance(item, list) or len(item) != 2:
+                    raise ConfigurationError(
+                        f"capture.{name}[{index}] must be [x_mm, y_mm]"
+                    )
+                result.append(
+                    MachinePoint(
+                        _number(item[0], f"capture.{name}[{index}][0]"),
+                        _number(item[1], f"capture.{name}[{index}][1]"),
+                    )
+                )
+            return tuple(result)
+
+        eject_points = points("eject_points")
+        buffer_points = points("buffer_points")
+        if enabled and mode == "slots" and not slots:
             raise ConfigurationError(
                 "capture.enabled is true, but no capture slots are configured"
             )
-        return cls(enabled=enabled, slots=tuple(slots))
+        if enabled and mode == "eject" and not eject_points:
+            raise ConfigurationError(
+                "capture eject mode requires at least one eject point"
+            )
+        if enabled and mode == "eject" and not buffer_points:
+            raise ConfigurationError(
+                "capture eject mode requires at least one castling buffer point"
+            )
+        return cls(
+            enabled=enabled,
+            slots=tuple(slots),
+            mode=mode,
+            eject_points=eject_points,
+            buffer_points=buffer_points,
+        )
 
 
 @dataclass(frozen=True)
@@ -551,15 +598,20 @@ class AppConfig:
         )
 
         seen_slots = set()
-        for index, slot in enumerate(self.capture.slots):
+        physical_capture_points = (
+            self.capture.slots
+            if self.capture.mode == "slots"
+            else self.capture.eject_points
+        ) + self.capture.buffer_points
+        for index, slot in enumerate(physical_capture_points):
             if not self.workspace.contains(slot):
                 raise ConfigurationError(
-                    f"capture slot {index} is outside the workspace"
+                    f"capture point {index} is outside the workspace"
                 )
             key = (round(slot.x, 6), round(slot.y, 6))
             if key in seen_slots:
                 raise ConfigurationError(
-                    f"capture slot {index} duplicates another capture slot"
+                    f"capture point {index} duplicates another capture point"
                 )
             seen_slots.add(key)
             if (
@@ -567,7 +619,7 @@ class AppConfig:
                 and board_min_y <= slot.y <= board_max_y
             ):
                 raise ConfigurationError(
-                    f"capture slot {index} lies inside the playing-board footprint"
+                    f"capture point {index} lies inside the playing-board footprint"
                 )
 
         if self.motion.park_position is not None:

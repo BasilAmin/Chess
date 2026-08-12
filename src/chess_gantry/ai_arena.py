@@ -138,7 +138,7 @@ class AIArena:
                 move = board.parse_uci(choice.uci)
                 san = board.san(move)
                 if self._physical:
-                    if board.is_capture(move) or move.promotion is not None:
+                    if board.is_capture(move) and not self.config.capture.enabled:
                         with self._lock:
                             self._manual_action = {
                                 "actor": actor,
@@ -241,7 +241,13 @@ class AIArena:
     def _execute_physical(self, board: Any, move: Any, actor: str) -> None:
         assert self._service is not None and self._link is not None
         event = f"ai-arena.{board.ply() + 1}.{actor}"
-        deltas = chess_move_deltas(board, move, self._service.store.load(), event)
+        deltas = chess_move_deltas(
+            board,
+            move,
+            self._service.store.load(),
+            event,
+            allow_promotion_replacement=True,
+        )
         for delta in deltas:
             if self.demo:
                 state = self._service.store.load()

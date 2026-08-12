@@ -216,15 +216,18 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(self.coordinator._serial_settings.baudrate, 250000)
         self.assertEqual(self.coordinator._serial_settings.fallback_baudrates, ())
 
-    def test_capture_is_blocked_without_storage(self):
+    def test_remote_capture_ejects_with_configured_chute(self):
         self.coordinator._mode = "mirror"
         self.coordinator._game_id = "game1234"
         self.coordinator._service = self.coordinator._new_service("game1234")
         self.coordinator._board = chess.Board()
         for uci in ("e2e4", "d7d5"):
             self.coordinator._execute_remote(uci)
-        with self.assertRaisesRegex(ConfigurationError, "capture storage"):
-            self.coordinator._execute_remote("e4d5")
+        self.coordinator._execute_remote("e4d5")
+        state = self.coordinator._service.store.load()
+        self.assertEqual(state.pieces["black_pawn_d"].status, "captured")
+        self.assertEqual(state.pieces["white_pawn_e"].x, 3)
+        self.assertEqual(state.pieces["white_pawn_e"].y, 4)
 
     def test_global_pending_transaction_blocks_game_start(self):
         (self.root / "data" / "pending_move.json").write_text("{}")
@@ -292,15 +295,16 @@ class CoordinatorTests(unittest.TestCase):
         )
         self.assertEqual(result["status"]["mode"], "openai")
 
-    def test_openai_capture_remains_blocked_without_storage(self):
+    def test_openai_capture_uses_configured_ejection(self):
         self.coordinator._mode = "openai"
         self.coordinator._game_id = None
         self.coordinator._service = self.coordinator._new_service("openai-capture")
         self.coordinator._board = chess.Board()
         for uci in ("e2e4", "d7d5"):
             self.coordinator._execute_remote(uci, actor="openai")
-        with self.assertRaisesRegex(ConfigurationError, "capture storage"):
-            self.coordinator._execute_remote("e4d5", actor="openai")
+        self.coordinator._execute_remote("e4d5", actor="openai")
+        state = self.coordinator._service.store.load()
+        self.assertEqual(state.pieces["black_pawn_d"].status, "captured")
 
 
 if __name__ == "__main__":

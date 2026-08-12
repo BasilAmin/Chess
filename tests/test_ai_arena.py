@@ -117,7 +117,7 @@ class AIArenaTests(unittest.TestCase):
             self.assertEqual(state.pieces["white_pawn_e"].y, 3)
             self.assertEqual(state.pieces["black_pawn_e"].y, 4)
 
-    def test_physical_capture_pauses_for_manual_confirmation_then_commits(self):
+    def test_physical_capture_ejects_and_commits_without_manual_pause(self):
         from chess_gantry.config import AppConfig
 
         with TemporaryDirectory() as directory:
@@ -137,19 +137,10 @@ class AIArenaTests(unittest.TestCase):
             )
             arena.start(delay_s=0, max_plies=3, physical=True)
             deadline = time.monotonic() + 4
-            while (
-                arena.status()["state"] != "waiting_manual"
-                and time.monotonic() < deadline
-            ):
-                time.sleep(0.01)
-            pending = arena.status()["manual_action"]
-            self.assertEqual(pending["uci"], "e4d5")
-            self.assertTrue(pending["capture"])
-            arena.confirm_manual_action()
-            deadline = time.monotonic() + 4
             while arena.running() and time.monotonic() < deadline:
                 time.sleep(0.01)
             self.assertEqual(arena.status()["state"], "finished")
+            self.assertIsNone(arena.status()["manual_action"])
             state = arena._service.store.load()
             self.assertEqual(state.pieces["white_pawn_e"].x, 3)
             self.assertEqual(state.pieces["white_pawn_e"].y, 4)

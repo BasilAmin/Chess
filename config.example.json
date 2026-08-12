@@ -48,8 +48,17 @@
     "max_expanded_nodes": 100000
   },
   "capture": {
-    "enabled": false,
-    "slots": []
+    "enabled": true,
+    "mode": "eject",
+    "slots": [],
+    "eject_points": [
+      [0.0, 0.0],
+      [0.0, 300.0]
+    ],
+    "buffer_points": [
+      [10.0, 0.0],
+      [10.0, 300.0]
+    ]
   },
   "safety": {
     "calibrated": true,

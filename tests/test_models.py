@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from chess_gantry.errors import StateError, ValidationError
-from chess_gantry.models import BoardState, GridPosition, MoveDelta
+from chess_gantry.models import BoardState, GridPosition, MachinePoint, MoveDelta
 
 
 class MoveDeltaTests(unittest.TestCase):
@@ -154,6 +154,46 @@ class BoardStateTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(StateError, "already been applied"):
             state.validate_move(move)
+
+    def test_buffered_piece_round_trips_and_returns_to_board(self) -> None:
+        state = BoardState.standard()
+        buffered = state.buffer_piece(
+            "white_rook_h", MachinePoint(10.0, 300.0), "castle.buffer-out"
+        )
+        piece = buffered.pieces["white_rook_h"]
+        self.assertEqual(piece.status, "buffered")
+        self.assertIsNone(piece.board_position)
+        self.assertEqual((piece.machine_x, piece.machine_y), (10.0, 300.0))
+        self.assertEqual(buffered.schema_version, 2)
+        restored = BoardState.from_mapping(buffered.to_dict())
+        returned = restored.unbuffer_piece(
+            "white_rook_h", GridPosition(5, 2), "castle.buffer-in"
+        )
+        self.assertEqual(
+            returned.pieces["white_rook_h"].board_position, GridPosition(5, 2)
+        )
+        self.assertEqual(returned.revision, 2)
+
+    def test_buffer_destination_must_be_empty(self) -> None:
+        buffered = BoardState.standard().buffer_piece(
+            "white_rook_h", MachinePoint(10.0, 300.0)
+        )
+        with self.assertRaisesRegex(StateError, "occupied"):
+            buffered.unbuffer_piece("white_rook_h", GridPosition(4, 0))
+
+    def test_buffered_state_requires_v2_and_finite_coordinates(self) -> None:
+        raw = (
+            BoardState.standard()
+            .buffer_piece("white_rook_h", MachinePoint(10.0, 300.0))
+            .to_dict()
+        )
+        raw["schema_version"] = 1
+        with self.assertRaisesRegex(ValidationError, "schema_version 2"):
+            BoardState.from_mapping(raw)
+        raw["schema_version"] = 2
+        raw["pieces"]["white_rook_h"]["machine_x"] = float("nan")
+        with self.assertRaisesRegex(ValidationError, "finite"):
+            BoardState.from_mapping(raw)
 
 
 if __name__ == "__main__":
