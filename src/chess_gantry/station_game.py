@@ -17,7 +17,7 @@ from .persistence import atomic_write_json
 from .serial_link import DemoMarlinSerial, MarlinSerial
 
 
-STATION_CONFIRMATION = "r/shitter"
+STATION_CONFIRMATION = "STATION BOARD AND CHUTES READY"
 
 
 def qr_svg(value: str) -> bytes:
@@ -65,6 +65,13 @@ class StationGame:
             raise ValidationError(f"type exactly: {STATION_CONFIRMATION}")
         if not base_url.startswith(("http://", "https://")):
             raise ValidationError("station base URL must be HTTP or HTTPS")
+        pending = tuple(
+            self.root.glob("data/station-games/*/pending_move.json")
+        )
+        if pending:
+            raise ConfigurationError(
+                f"pending station transaction at {pending[0]}; reconcile it before creating another game"
+            )
         with self._lock:
             if self.active():
                 raise ConfigurationError("a station game is already active")
@@ -152,8 +159,9 @@ class StationGame:
                 self._state = "playing"
         except Exception as exc:
             with self._lock:
-                self._error = str(exc)
-                self._state = "failed"
+                if self._state != "stopped":
+                    self._error = str(exc)
+                    self._state = "failed"
             self._close_link()
 
     def _require_mirror(self) -> LichessMirror:
@@ -168,9 +176,11 @@ class StationGame:
             return []
         return [
             "".join(
-                self._board.piece_at(chess.square(file_index, rank)).symbol()
-                if self._board.piece_at(chess.square(file_index, rank))
-                else "."
+                (
+                    self._board.piece_at(chess.square(file_index, rank)).symbol()
+                    if self._board.piece_at(chess.square(file_index, rank))
+                    else "."
+                )
                 for file_index in range(8)
             )
             for rank in range(7, -1, -1)
@@ -187,9 +197,7 @@ class StationGame:
     def player_status(self, token: str) -> dict[str, Any]:
         with self._lock:
             color = self._seat(token)
-            turn = (
-                "white" if self._board is not None and self._board.turn else "black"
-            )
+            turn = "white" if self._board is not None and self._board.turn else "black"
             return {
                 "game_id": self._game_id,
                 "seat": color,
@@ -269,16 +277,19 @@ class StationGame:
                             "color": color,
                         }
                     )
-                    outcome = board.outcome(claim_draw=True)
-                    if outcome is not None:
+                    outcome = board.outcome(claim_draw=False)
+                    if self._state == "stopped":
+                        pass
+                    elif outcome is not None:
                         self._result = outcome.result()
                         self._state = "finished"
                     else:
                         self._state = "playing"
             except Exception as exc:
                 with self._lock:
-                    self._error = str(exc)
-                    self._state = "failed"
+                    if self._state != "stopped":
+                        self._error = str(exc)
+                        self._state = "failed"
                 self._close_link()
                 raise
             if self._state == "finished":
@@ -300,6 +311,15 @@ class StationGame:
             if self._state == "idle":
                 raise ConfigurationError("there is no station game")
             self._state = "stopped"
+            link = self._link
+        if link is not None:
+            link.best_effort(
+                (
+                    *self.config.magnet.off_commands,
+                    self.config.safety.emergency_stop_command,
+                    "M211 S1",
+                )
+            )
         self._close_link()
         return self.admin_status()
 

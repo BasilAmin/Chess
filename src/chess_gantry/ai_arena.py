@@ -34,7 +34,7 @@ class AIArena:
         self._black = "claude"
         self._style = "balanced"
         self._delay_s = 0.5
-        self._max_plies = 200
+        self._max_plies: Optional[int] = None
         self._started_at: Optional[float] = None
         self.config = config
         self.root = root
@@ -66,7 +66,7 @@ class AIArena:
         black: str = "claude",
         style: str = "balanced",
         delay_s: float = 0.5,
-        max_plies: int = 200,
+        max_plies: Optional[int] = None,
         physical: bool = False,
         confirm_motion: bool = False,
         serial_port: Optional[str] = None,
@@ -86,7 +86,7 @@ class AIArena:
             raise ValidationError("AI arena style is invalid")
         if not 0 <= delay_s <= 30:
             raise ValidationError("AI arena delay must be between 0 and 30 seconds")
-        if not 1 <= max_plies <= 500:
+        if max_plies is not None and not 1 <= max_plies <= 500:
             raise ValidationError("AI arena ply limit must be between 1 and 500")
         if physical and (self.config is None or self.root is None):
             raise ConfigurationError("physical AI arena is not configured")
@@ -126,7 +126,10 @@ class AIArena:
                     if (
                         board is None
                         or board.is_game_over()
-                        or board.ply() >= self._max_plies
+                        or (
+                            self._max_plies is not None
+                            and board.ply() >= self._max_plies
+                        )
                     ):
                         self._state = "finished"
                         return

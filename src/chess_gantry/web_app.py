@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 import json
 import os
+import socket
 import threading
 import time
 import webbrowser
@@ -40,6 +41,28 @@ def web_bind_error(host: str, port: int, exc: OSError) -> ValidationError:
             f"Chess Gantry server or use --web-port {port + 1}"
         )
     return ValidationError(f"could not bind web address {host}:{port}: {exc}")
+
+
+def station_public_url(host: str, port: int) -> str:
+    configured = os.environ.get("CHESS_GANTRY_PUBLIC_URL", "").strip().rstrip("/")
+    if configured:
+        parsed = urlsplit(configured)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValidationError(
+                "CHESS_GANTRY_PUBLIC_URL must be a complete HTTP or HTTPS origin"
+            )
+        return configured
+    resolved = host
+    if host in {"0.0.0.0", "::"}:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("192.0.2.1", 9))
+            resolved = str(probe.getsockname()[0])
+        except OSError:
+            resolved = socket.gethostbyname(socket.gethostname())
+        finally:
+            probe.close()
+    return f"http://{resolved}:{port}"
 
 
 HTML = r"""<!doctype html>
@@ -241,6 +264,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "camera": camera,
                         "game": game,
                         "arena": arena,
+                        "station": self._station().admin_status(),
                         "commissioning": commissioning,
                         "board": self.controller.board_state(),
                         "pending": pending,
@@ -360,8 +384,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 result = self._station().resign(str(payload.get("token", "")))
             elif parsed.path == "/api/station/create":
                 if self._game().running() or self._arena().running():
-                    raise ConfigurationError("stop the current game before station mode")
-                if not self._commissioning().status()["commissioned"] and not self.controller.demo:
+                    raise ConfigurationError(
+                        "stop the current game before station mode"
+                    )
+                if (
+                    not self._commissioning().status()["commissioned"]
+                    and not self.controller.demo
+                ):
                     raise ConfigurationError(
                         "station mode requires completed commissioning attestation"
                     )
@@ -372,11 +401,21 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "reconcile the pending physical transaction before station mode"
                     )
                 result = self._station().create(
-                    base_url=str(payload.get("base_url", "")),
+                    base_url=self.server.station_public_url,
                     confirmation=str(payload.get("confirmation", "")),
                 )
             elif parsed.path == "/api/station/stop":
                 result = self._station().stop()
+            elif parsed.path == "/api/station/reconcile/apply":
+                result = self._station().reconcile(
+                    applied=True,
+                    confirmation=str(payload.get("confirmation", "")),
+                )
+            elif parsed.path == "/api/station/reconcile/discard":
+                result = self._station().reconcile(
+                    applied=False,
+                    confirmation=str(payload.get("confirmation", "")),
+                )
             elif parsed.path == "/api/controller/connect":
                 baudrate = payload.get("baudrate")
                 result = self.controller.connect(
@@ -512,7 +551,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     black=str(payload.get("black", "claude")),
                     style=str(payload.get("style", "balanced")),
                     delay_s=float(payload.get("delay_s", 0.5)),
-                    max_plies=int(payload.get("max_plies", 200)),
+                    max_plies=None,
                     physical=physical,
                     confirm_motion=payload.get("confirm_motion") is True,
                     serial_port=str(payload.get("serial_port", "")).strip() or None,
@@ -665,8 +704,10 @@ def run_web_server(
     server.commissioning = commissioning
     server.clerk_verifier = ClerkVerifier(settings) if settings else None
     server.dashboard_html = render_dashboard(HTML, settings) if settings else HTML
+    server.station_public_url = station_public_url(host, port)
     url = f"http://{host}:{port}"
     print(f"Chess Gantry running at {url}")
+    print(f"Station lobby at {server.station_public_url}/station")
     print(f"Default phone camera: {source}")
     print("Press Control-C to stop it.")
     if open_browser:

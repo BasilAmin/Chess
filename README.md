@@ -574,6 +574,53 @@ castling buffer placement. The repository verifies legal/state/transaction/path
 behavior, but only a real gantry run can validate alignment, friction, magnet
 strength, tray geometry, and current firmware timing.
 
+### Two-Phone Station Mode
+
+Station mode is the streamlined two-player workflow. The operator prepares the
+standard physical position and collection tray once, opens `/station`, and
+presses **Create game**. The page displays separate White and Black QR codes.
+Each player scans one code; after both seats join, the gantry homes automatically
+and the mobile boards become active.
+
+Run a LAN-accessible demo station:
+
+```bash
+uv run chess-gantry --config config.demo.json web \
+  --demo --web-host 0.0.0.0 --allow-network
+```
+
+Run the commissioned physical station:
+
+```bash
+uv run chess-gantry --config config.json web \
+  --web-host 0.0.0.0 --allow-network
+```
+
+Open `http://STATION_LAN_IP:8000/station` on the operator display. Both phones
+must be able to reach that same LAN address. Before creating a physical game,
+type the exact phrase `STATION BOARD AND CHUTES READY`.
+
+Station behavior:
+
+- no Lichess account or external game service is required;
+- no chess clock, idle timeout, game-duration timeout, or ply cutoff exists;
+- phones reconnect by reopening the same scanned seat URL;
+- moves are accepted only for that seat, on its turn, from the server-generated
+  legal-move allowlist;
+- every move uses the persistent Marlin link and the same capture, en passant,
+  castling, promotion-proxy, journal, and path-planning pipeline as mirroring;
+- checkmate, stalemate, automatic rule draws, resignation, operator stop, or a
+  hardware failure ends the game and switches the magnet off;
+- the operator QR/status routes remain behind the configured dashboard auth;
+- seat capabilities are random URL fragments, are removed from browser history,
+  never appear in HTTP request URLs, and are stored on disk only as SHA-256
+  hashes.
+
+The server still retains finite per-command Marlin and network timeouts so a
+failed controller or dead connection cannot hang an actuator operation forever.
+Those are hardware fault boundaries, not game-duration limits; a healthy station
+game remains active until chess or an operator ends it.
+
 ### Physical Claude Vs ChatGPT
 
 Add both provider keys to the ignored `.env.local` file:

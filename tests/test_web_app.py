@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -18,6 +19,7 @@ from chess_gantry.errors import ConfigurationError, ValidationError
 from chess_gantry.models import BoardState
 from chess_gantry.persistence import atomic_write_json
 from chess_gantry.service import GantryService
+from chess_gantry.station_game import STATION_CONFIRMATION, StationGame
 from chess_gantry.web_app import (
     HTML,
     GantryHTTPServer,
@@ -361,6 +363,7 @@ class WebAppTests(unittest.TestCase):
         self.server.game = FakeGame()
         self.server.ai_arena = FakeArena()
         self.server.commissioning = FakeCommissioning()
+        self.server.station_game = StationGame(root, self.config, demo=True)
         self.server.openai_opponent = FakeOpponent()
         self.server.lichess_oauth = FakeOAuth()
         self.server.clerk_verifier = None
@@ -370,6 +373,8 @@ class WebAppTests(unittest.TestCase):
         self.base = f"http://127.0.0.1:{self.server.server_port}"
 
     def tearDown(self):
+        if self.server.station_game.active():
+            self.server.station_game.stop()
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
@@ -419,6 +424,39 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("ArUco + color caps", html)
         self.assertIn("Generate 4 references", html)
         self.assertIn("Auto-calibrate ArUco", html)
+
+    def test_station_pages_qr_join_and_moves_work_without_authentication(self):
+        with urllib.request.urlopen(self.base + "/station") as response:
+            station_html = response.read().decode()
+        self.assertIn("Scan. Sit. Play.", station_html)
+        with urllib.request.urlopen(self.base + "/station/play") as response:
+            player_html = response.read().decode()
+        self.assertIn("Connecting to station", player_html)
+        _, created = self.request(
+            "/api/station/create",
+            {"confirmation": STATION_CONFIRMATION, "base_url": self.base},
+        )
+        urls = created["result"]["join_urls"]
+        tokens = {color: url.rsplit("#", 1)[1] for color, url in urls.items()}
+        with urllib.request.urlopen(
+            self.base + "/api/station/qr?seat=white"
+        ) as response:
+            self.assertEqual(response.headers.get_content_type(), "image/svg+xml")
+            self.assertIn(b"<svg", response.read())
+        self.request("/api/station/join", {"token": tokens["white"]})
+        self.request("/api/station/join", {"token": tokens["black"]})
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            _, status = self.request("/api/station/state", {"token": tokens["white"]})
+            if status["result"]["state"] == "playing":
+                break
+            time.sleep(0.01)
+        self.assertEqual(status["result"]["state"], "playing")
+        _, moved = self.request(
+            "/api/station/move", {"token": tokens["white"], "uci": "e2e4"}
+        )
+        self.assertEqual(moved["result"]["turn"], "black")
+        self.assertIsNone(moved["result"]["expires_at"])
 
     def test_every_javascript_dom_reference_exists_in_dashboard(self):
         ids = set(re.findall(r'id="([A-Za-z][A-Za-z0-9_-]*)"', HTML))
@@ -707,6 +745,7 @@ class WebAppTests(unittest.TestCase):
             },
         )
         self.assertEqual(data["result"]["state"], "running")
+        self.assertIsNone(self.server.ai_arena.started["max_plies"])
         self.server.ai_arena.manual = {"uci": "e4d5"}
         _, data = self.request(
             "/api/arena/confirm-manual",
