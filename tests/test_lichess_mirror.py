@@ -192,7 +192,7 @@ class MirrorTests(unittest.TestCase):
         self.assertEqual(cursor.moves, ("e2e4",))
         self.assertEqual(cursor.physical_revision, 1)
 
-    def test_stream_divergence_and_backlog_are_rejected(self):
+    def test_stream_divergence_is_rejected_but_backlog_is_allowed(self):
         session = self.session()
         cursor = MirrorCursor.create("game1234")
         cursor = cursor.__class__(
@@ -203,9 +203,27 @@ class MirrorTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ConfigurationError, "diverged"):
             session._verify_prefix(cursor, ("d2d4",))
-        fresh = MirrorCursor.create("game1234")
-        with self.assertRaisesRegex(ConfigurationError, "backlog"):
-            session._verify_prefix(fresh, ("e2e4", "e7e5"))
+        session._verify_prefix(MirrorCursor.create("game1234"), ("e2e4", "e7e5"))
+
+    def test_large_stream_update_executes_every_missing_ply_in_order(self):
+        session = self.session(execute=False)
+        cursor = session._initialize()
+        remote = (
+            "e2e4",
+            "e7e5",
+            "g1f3",
+            "b8c6",
+            "f1e2",
+            "g8f6",
+            "e1g1",
+            "f8e7",
+            "d2d3",
+            "e8g8",
+            "b1c3",
+            "d7d6",
+        )
+        completed = session._execute_remote_prefix(cursor, remote)
+        self.assertEqual(completed.moves, remote)
 
     def test_capture_ejects_piece_and_continues(self):
         session = self.session(execute=False)

@@ -168,6 +168,7 @@ class LichessMirror:
         pgn_fetcher: Callable[..., str] = fetch_pgn,
         sleep: Callable[[float], None] = time.sleep,
         directory: Optional[Path] = None,
+        allow_initial_history: bool = False,
     ) -> None:
         if directory is None:
             if not game_id.isalnum() or not 8 <= len(game_id) <= 12:
@@ -192,6 +193,7 @@ class LichessMirror:
         self.client = client or lichess_client(self.token)
         self.pgn_fetcher = pgn_fetcher
         self.sleep = sleep
+        self.allow_initial_history = allow_initial_history
         session_kind = "demo" if demo else "physical" if execute else "simulation"
         self.directory = directory or (
             root / "data" / "lichess-mirror" / game_id / session_kind
@@ -245,7 +247,7 @@ class LichessMirror:
         snapshot, _, result = _game_snapshot(
             self.pgn_fetcher(self.game_id, token=self.token, client=self.client)
         )
-        if snapshot:
+        if snapshot and not self.allow_initial_history:
             raise ConfigurationError(
                 "physical mirror must start before the first Lichess move; create a fresh game"
             )
@@ -270,10 +272,14 @@ class LichessMirror:
             raise ConfigurationError(
                 "Lichess move history diverged from the committed mirror cursor"
             )
-        if len(remote) - len(cursor.moves) > 1:
-            raise ConfigurationError(
-                "physical mirror backlog exceeded one ply; stop and verify the physical board"
-            )
+
+    def _execute_remote_prefix(
+        self, cursor: MirrorCursor, remote: tuple[str, ...]
+    ) -> MirrorCursor:
+        self._verify_prefix(cursor, remote)
+        while len(cursor.moves) < len(remote):
+            cursor = self._execute_ply(cursor, remote[len(cursor.moves)])
+        return cursor
 
     def _recover_reconciled_submove(self, cursor: MirrorCursor) -> MirrorCursor:
         if not cursor.pending_uci:
@@ -562,7 +568,7 @@ class LichessMirror:
                     )
                     self._verify_prefix(cursor, snapshot)
                     if len(snapshot) > len(cursor.moves):
-                        cursor = self._execute_ply(cursor, snapshot[len(cursor.moves)])
+                        cursor = self._execute_remote_prefix(cursor, snapshot)
                         board = self._board(cursor)
                     cursor = replace(cursor, result=result)
                     cursor.save(self.cursor_path)
@@ -580,9 +586,7 @@ class LichessMirror:
                         )
                         self._verify_prefix(cursor, remote)
                         if len(remote) > len(cursor.moves):
-                            cursor = self._execute_ply(
-                                cursor, remote[len(cursor.moves)]
-                            )
+                            cursor = self._execute_remote_prefix(cursor, remote)
                             board = self._board(cursor)
                         if stream_result != cursor.result:
                             cursor = replace(cursor, result=stream_result)

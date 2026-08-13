@@ -25,8 +25,9 @@ from .models import BoardState
 from .openai_opponent import ClaudeChessOpponent, SolChessOpponent
 from .serial_link import discover_serial_ports
 from .service import GantryService
-from .station_game import StationGame, qr_svg
-from .station_web import STATION_HTML, STATION_PLAYER_HTML
+from .station_game import qr_svg
+from .lichess_station import LichessStation
+from .station_web import STATION_HTML
 from .vision import DEFAULT_PHONE_SOURCE, SolVisionManager
 
 
@@ -184,18 +185,11 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _commissioning(self) -> CommissioningStore:
         return self.server.commissioning
 
-    def _station(self) -> StationGame:
+    def _station(self) -> LichessStation:
         return self.server.station_game
 
     def _station_player_endpoint(self, path: str) -> bool:
-        return path in {
-            "/api/station/join",
-            "/api/station/state",
-            "/api/station/move",
-            "/api/station/resign",
-            "/api/station/leave",
-            "/api/station/draw",
-        }
+        return False
 
     def _require_station_idle(self) -> None:
         if self._station().reserves_hardware():
@@ -236,9 +230,6 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/":
             self._html(self.server.dashboard_html)
-            return
-        if parsed.path == "/station/play":
-            self._html(STATION_PLAYER_HTML)
             return
         if not self._authenticated():
             self._json({"ok": False, "error": "authentication required"}, 401)
@@ -384,27 +375,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "result": result})
                 return
             payload = self._payload()
-            if parsed.path == "/api/station/join":
-                result = self._station().join(str(payload.get("token", "")))
-            elif parsed.path == "/api/station/state":
-                result = self._station().player_status(str(payload.get("token", "")))
-            elif parsed.path == "/api/station/move":
-                result = self._station().move(
-                    str(payload.get("token", "")),
-                    str(payload.get("uci", "")),
-                    expected_ply=(
-                        int(payload["expected_ply"])
-                        if payload.get("expected_ply") is not None
-                        else None
-                    ),
-                )
-            elif parsed.path == "/api/station/resign":
-                result = self._station().resign(str(payload.get("token", "")))
-            elif parsed.path == "/api/station/leave":
-                result = self._station().leave(str(payload.get("token", "")))
-            elif parsed.path == "/api/station/draw":
-                result = self._station().offer_draw(str(payload.get("token", "")))
-            elif parsed.path == "/api/station/create":
+            if parsed.path == "/api/station/create":
                 if self._game().running() or self._arena().running():
                     raise ConfigurationError(
                         "stop the current game before station mode"
@@ -432,8 +403,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
             elif parsed.path == "/api/station/stop":
                 result = self._station().stop()
-            elif parsed.path == "/api/station/resume":
-                result = self._station().resume(str(payload.get("confirmation", "")))
             elif parsed.path == "/api/station/reconcile/apply":
                 result = self._station().reconcile(
                     applied=True,
@@ -728,7 +697,7 @@ def run_web_server(
         opponent=opponent,
     )
     arena = AIArena(opponent, claude, config=config, root=root, demo=demo)
-    station = StationGame(root, config, demo=demo)
+    station = LichessStation(root, config, demo=demo)
     commissioning = CommissioningStore(
         root / "data" / "commissioning.json", root / "config.json"
     )
