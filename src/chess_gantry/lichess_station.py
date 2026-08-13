@@ -18,6 +18,8 @@ from .serial_link import DemoMarlinSerial, MarlinSerial
 
 STATION_CONFIRMATION = "STATION BOARD AND CHUTES READY"
 STATION_RECOVERY_CONFIRMATION = "STATION PHYSICAL STATE VERIFIED"
+POLL_INTERVAL_S = 2.0
+MAX_RETRY_DELAY_S = 60.0
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,8 @@ class LichessStation:
         self._mirror: Optional[LichessMirror] = None
         self._started_at: Optional[float] = None
         self._history: list[str] = []
+        self._network_error: Optional[str] = None
+        self._retry_delay_s = POLL_INTERVAL_S
 
     def active(self) -> bool:
         with self._lock:
@@ -104,6 +108,8 @@ class LichessStation:
             self._mirror = mirror
             self._started_at = time.time()
             self._history = []
+            self._network_error = None
+            self._retry_delay_s = POLL_INTERVAL_S
             atomic_write_json(
                 directory / "station.json",
                 {
@@ -132,6 +138,7 @@ class LichessStation:
         mirror: LichessMirror,
         challenge: StationChallenge,
     ) -> None:
+        retry_delay = POLL_INTERVAL_S
         while True:
             with self._lock:
                 if not self._current(generation, mirror) or self._state == "stopped":
@@ -140,11 +147,17 @@ class LichessStation:
                 pgn = self.pgn_fetcher(
                     challenge.game_id, token=None, client=self.client
                 )
-                if isinstance(pgn, str) and pgn.strip():
-                    break
-            except Exception:
-                pass
-            self.sleep(0.5)
+                snapshot, status, result = _game_snapshot(pgn)
+                with self._lock:
+                    self._network_error = None
+                    self._retry_delay_s = POLL_INTERVAL_S
+                break
+            except Exception as exc:
+                with self._lock:
+                    self._network_error = str(exc)
+                    self._retry_delay_s = retry_delay
+                self.sleep(retry_delay)
+                retry_delay = min(MAX_RETRY_DELAY_S, retry_delay * 2.0)
         with self._lock:
             if not self._current(generation, mirror):
                 return
@@ -162,16 +175,30 @@ class LichessStation:
                         or self._state == "stopped"
                     ):
                         return
-                snapshot, status, result = _game_snapshot(
-                    self.pgn_fetcher(challenge.game_id, token=None, client=self.client)
-                )
+                try:
+                    snapshot, status, result = _game_snapshot(
+                        self.pgn_fetcher(
+                            challenge.game_id, token=None, client=self.client
+                        )
+                    )
+                except Exception as exc:
+                    with self._lock:
+                        self._network_error = str(exc)
+                        self._retry_delay_s = retry_delay
+                    self.sleep(retry_delay)
+                    retry_delay = min(MAX_RETRY_DELAY_S, retry_delay * 2.0)
+                    continue
+                retry_delay = POLL_INTERVAL_S
+                with self._lock:
+                    self._network_error = None
+                    self._retry_delay_s = POLL_INTERVAL_S
                 cursor = mirror._execute_remote_prefix(cursor, snapshot)
                 with self._lock:
                     self._history = list(cursor.moves)
                     self._result = result
                 if status == "finished":
                     break
-                self.sleep(0.5)
+                self.sleep(POLL_INTERVAL_S)
             with self._lock:
                 if not self._current(generation, mirror):
                     return
@@ -224,6 +251,8 @@ class LichessStation:
                 "history": list(self._history),
                 "result": self._result,
                 "error": self._error,
+                "network_error": self._network_error,
+                "retry_delay_s": self._retry_delay_s,
                 "started_at": self._started_at,
                 "clock": None,
                 "expires_at": None,

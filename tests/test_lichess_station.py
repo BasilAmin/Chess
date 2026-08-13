@@ -104,3 +104,68 @@ class LichessStationTests(unittest.TestCase):
         self.assertNotEqual(first["game_id"], second["game_id"])
         self.assertNotEqual(first["join_urls"], second["join_urls"])
         station.stop()
+
+    def test_transient_fetch_failures_never_stop_active_game(self):
+        moves = (
+            "e2e4",
+            "e7e5",
+            "g1f3",
+            "b8c6",
+            "f1e2",
+            "g8f6",
+            "e1g1",
+            "f8e7",
+            "d2d3",
+            "e8g8",
+            "b1c3",
+            "d7d6",
+        )
+        responses = iter(
+            (
+                pgn(),
+                pgn(moves[:2]),
+                TimeoutError("read timed out"),
+                RuntimeError("HTTP 429 Too Many Requests"),
+                pgn(moves[:6]),
+                ConnectionError("connection reset"),
+                pgn(moves[:10]),
+                pgn(moves, result="1-0"),
+            )
+        )
+
+        def fetcher(*args, **kwargs):
+            value = next(responses)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        challenge = OpenChallenge(
+            "game9999",
+            "https://lichess.org/game9999?color=white",
+            "https://lichess.org/game9999?color=black",
+            "https://lichess.org/game9999",
+        )
+        sleeps = []
+        station = LichessStation(
+            self.root,
+            self.config,
+            demo=True,
+            challenge_factory=lambda **kwargs: challenge,
+            client=FakeClient([]),
+            pgn_fetcher=fetcher,
+            sleep=lambda value: sleeps.append(value),
+        )
+        station.create(base_url="unused", confirmation=STATION_CONFIRMATION)
+        deadline = time.monotonic() + 5
+        while (
+            station.admin_status()["state"] not in {"finished", "failed"}
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        status = station.admin_status()
+        self.assertEqual(status["state"], "finished")
+        self.assertEqual(status["history"], list(moves))
+        self.assertIsNone(status["error"])
+        self.assertIsNone(status["network_error"])
+        self.assertIn(4.0, sleeps)
+        self.assertGreaterEqual(sleeps.count(2.0), 3)

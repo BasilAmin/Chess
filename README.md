@@ -529,6 +529,39 @@ Included replay samples:
 | `examples/replays/straight-pawns.pgn`         | 32 plies of straight pawn movement only; no knights, diagonals, captures, or special moves             |
 | `examples/replays/clear-lanes-no-knights.pgn` | Pawn, queen, bishop, and rook development with no knights; every diagonal has at least 30 mm clearance |
 
+Run every replay in simulated Marlin mode:
+
+```bash
+for game in examples/replays/*.pgn; do
+  ./scripts/replay_game.sh "$game" --demo --reset-session --no-screen
+done
+```
+
+Run every replay in simulated Marlin mode with a one-second pause between plies:
+
+```bash
+for game in examples/replays/*.pgn; do
+  ./scripts/replay_game.sh "$game" \
+    --demo --reset-session --no-screen --move-delay 1
+done
+```
+
+Run the physical replays individually. Reset every physical piece to the standard
+position, replace captured pieces, and clear both chutes before each command:
+
+```bash
+./scripts/replay_game.sh examples/replays/capture-checkmate.pgn --reset-session
+./scripts/replay_game.sh examples/replays/en-passant-castling.pgn --reset-session
+./scripts/replay_game.sh examples/replays/capture-promotion.pgn --reset-session
+./scripts/replay_game.sh examples/replays/opera-game.pgn --reset-session
+./scripts/replay_game.sh examples/replays/straight-pawns.pgn --reset-session
+./scripts/replay_game.sh examples/replays/clear-lanes-no-knights.pgn --reset-session
+```
+
+The physical script requires `REPLAY BOARD AND CHUTES READY` before each game.
+Do not run all physical replays in an unattended shell loop because the gantry
+cannot restore captures, promotions, or the standard starting position itself.
+
 Pause between plies:
 
 ```bash
@@ -570,7 +603,7 @@ Reconciliation requires the exact confirmation
 `REPLAY PHYSICAL STATE VERIFIED`. Reset refuses to remove a pending transaction.
 
 Software validation cannot certify mechanical perfection. Before relying on a
-live game, run all four samples in `--demo`, then physically replay them at
+live game, run all six samples in `--demo`, then physically replay them at
 configured speed while observing chute clearance, magnet pickup/release, and
 castling buffer placement. The repository verifies legal/state/transaction/path
 behavior, but only a real gantry run can validate alignment, friction, magnet
