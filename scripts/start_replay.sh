@@ -8,6 +8,7 @@ exec uv run chess-gantry --config config.json replay-game \
   examples/replays/clear-lanes-no-knights.pgn \
   --execute \
   --reset-session \
+  --discard-pending-on-reset \
   --confirm-motion \
   --confirm-clear-path \
   --confirm-capture-chutes \

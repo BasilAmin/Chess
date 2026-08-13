@@ -128,6 +128,7 @@ class RunCommandTests(unittest.TestCase):
                 "--max-plies",
                 "3",
                 "--reset-session",
+                "--discard-pending-on-reset",
                 "--no-screen",
                 "--physical-confirmation",
                 "REPLAY BOARD AND CHUTES READY",
@@ -138,6 +139,7 @@ class RunCommandTests(unittest.TestCase):
         self.assertEqual(args.move_delay, 0.5)
         self.assertEqual(args.max_plies, 3)
         self.assertTrue(args.reset_session)
+        self.assertTrue(args.discard_pending_on_reset)
         self.assertEqual(args.physical_confirmation, "REPLAY BOARD AND CHUTES READY")
 
     def test_web_defaults_to_unauthenticated_loopback(self) -> None:

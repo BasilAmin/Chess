@@ -268,6 +268,11 @@ def _parser() -> ArgumentParser:
         action="store_true",
         help="discard this replay's cursor/state and start from the standard position",
     )
+    replay.add_argument(
+        "--discard-pending-on-reset",
+        action="store_true",
+        help="with reset and exact standard-board confirmation, discard an old pending replay transaction",
+    )
     replay_actions.add_argument(
         "--status", action="store_true", help="print replay cursor and physical state"
     )
@@ -1227,6 +1232,21 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                     title="Chess Gantry Game Replay",
                 ),
             )
+            if args.discard_pending_on_reset:
+                if not args.reset_session:
+                    parser.error("--discard-pending-on-reset requires --reset-session")
+                if (
+                    not args.execute
+                    or not args.confirm_motion
+                    or not args.confirm_clear_path
+                    or not args.confirm_capture_chutes
+                    or args.physical_confirmation != FRESH_CONFIRMATION
+                ):
+                    parser.error(
+                        "discarding pending state requires physical execution confirmations and the exact standard-board phrase"
+                    )
+                if replay_session.mirror.journal_path.exists():
+                    replay_session.mirror.service.reconcile_discard()
             if args.reset_session:
                 replay_session.reset()
             if args.execute:
