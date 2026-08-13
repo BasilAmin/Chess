@@ -527,6 +527,7 @@ Included replay samples:
 | `examples/replays/capture-promotion.pgn`   | Multiple captures and capture-promotion pawn proxy                                         |
 | `examples/replays/opera-game.pgn`          | Full 33-ply game, captures, queenside castling, sacrifices, and mate                       |
 | `examples/replays/straight-pawns.pgn`      | 32 plies of straight pawn movement only; no knights, diagonals, captures, or special moves |
+| `examples/replays/clear-lanes-no-knights.pgn` | Pawn, queen, bishop, and rook development with no knights; every diagonal has at least 30 mm clearance |
 
 Pause between plies:
 

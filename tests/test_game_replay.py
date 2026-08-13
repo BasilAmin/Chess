@@ -50,6 +50,7 @@ class ReplayTests(unittest.TestCase):
             "capture-promotion.pgn": (9, "1-0"),
             "opera-game.pgn": (33, "1-0"),
             "straight-pawns.pgn": (32, "1/2-1/2"),
+            "clear-lanes-no-knights.pgn": (22, "1/2-1/2"),
         }
         for name, (plies, result) in expected.items():
             with self.subTest(name=name):
@@ -77,6 +78,66 @@ class ReplayTests(unittest.TestCase):
             self.assertTrue(from_file == to_file or from_rank == to_rank)
             self.assertFalse(board.is_capture(move))
             board.push(move)
+
+    def test_clear_lane_sample_has_no_knights_and_safe_diagonals(self) -> None:
+        import chess
+
+        from chess_gantry.kinematics import grid_to_machine
+        from chess_gantry.models import GridPosition
+        from chess_gantry.path_planning import segment_is_clear
+
+        game = load_replay_game(SAMPLES / "clear-lanes-no-knights.pgn")
+        board = chess.Board()
+        diagonal_count = 0
+        straight_count = 0
+        for uci in game.moves:
+            move = chess.Move.from_uci(uci)
+            piece = board.piece_at(move.from_square)
+            self.assertIsNotNone(piece)
+            self.assertNotEqual(piece.piece_type, chess.KNIGHT)
+            file_delta = abs(
+                chess.square_file(move.to_square)
+                - chess.square_file(move.from_square)
+            )
+            rank_delta = abs(
+                chess.square_rank(move.to_square)
+                - chess.square_rank(move.from_square)
+            )
+            if file_delta and rank_delta:
+                self.assertEqual(file_delta, rank_delta)
+                diagonal_count += 1
+                start = grid_to_machine(
+                    GridPosition(
+                        chess.square_file(move.from_square),
+                        chess.square_rank(move.from_square),
+                    ),
+                    self.config.board,
+                )
+                end = grid_to_machine(
+                    GridPosition(
+                        chess.square_file(move.to_square),
+                        chess.square_rank(move.to_square),
+                    ),
+                    self.config.board,
+                )
+                obstacles = []
+                for square in chess.SQUARES:
+                    if square == move.from_square or board.piece_at(square) is None:
+                        continue
+                    obstacles.append(
+                        grid_to_machine(
+                            GridPosition(
+                                chess.square_file(square), chess.square_rank(square)
+                            ),
+                            self.config.board,
+                        )
+                    )
+                self.assertTrue(segment_is_clear(start, end, obstacles, 30.0))
+            else:
+                straight_count += 1
+            board.push(move)
+        self.assertGreater(diagonal_count, 0)
+        self.assertGreater(straight_count, 0)
 
     def test_result_metadata_does_not_split_identical_physical_replay(self) -> None:
         first = self.root / "first.pgn"

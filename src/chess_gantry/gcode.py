@@ -80,7 +80,11 @@ class GCodeGenerator:
                         f"F{_format_number(self.config.motion.travel_feed_mm_min)}"
                     ),
                     "M400 ; arrive before energising magnet",
-                    *self.config.magnet.on_commands,
+                    *(
+                        self.config.magnet.capture_on_commands
+                        if transfer.purpose == "capture"
+                        else self.config.magnet.move_on_commands
+                    ),
                     *self._dwell(self.config.motion.magnet_on_dwell_ms),
                 ]
             )

@@ -309,15 +309,35 @@ class MotionSettings:
 @dataclass(frozen=True)
 class MagnetSettings:
     on_commands: Tuple[str, ...]
+    move_on_commands: Tuple[str, ...]
+    capture_on_commands: Tuple[str, ...]
     off_commands: Tuple[str, ...]
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "MagnetSettings":
-        _unknown(raw, {"on_commands", "off_commands"}, "magnet")
+        _unknown(
+            raw,
+            {
+                "on_commands",
+                "move_on_commands",
+                "capture_on_commands",
+                "off_commands",
+            },
+            "magnet",
+        )
+        on_commands = _commands(
+            raw.get("on_commands", ["M106 P0 S255"]),
+            "magnet.on_commands",
+        )
         return cls(
-            on_commands=_commands(
-                raw.get("on_commands", ["M106 P0 S255"]),
-                "magnet.on_commands",
+            on_commands=on_commands,
+            move_on_commands=_commands(
+                raw.get("move_on_commands", on_commands),
+                "magnet.move_on_commands",
+            ),
+            capture_on_commands=_commands(
+                raw.get("capture_on_commands", on_commands),
+                "magnet.capture_on_commands",
             ),
             off_commands=_commands(
                 raw.get("off_commands", ["M107 P0"]),

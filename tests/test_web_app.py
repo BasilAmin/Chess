@@ -20,7 +20,9 @@ from chess_gantry.errors import ConfigurationError, ValidationError
 from chess_gantry.models import BoardState
 from chess_gantry.persistence import atomic_write_json
 from chess_gantry.service import GantryService
-from chess_gantry.station_game import STATION_CONFIRMATION, StationGame
+from chess_gantry.lichess_open import OpenChallenge
+from chess_gantry.lichess_station import LichessStation, STATION_CONFIRMATION
+from tests.test_lichess_mirror import FakeClient
 from chess_gantry.web_app import (
     HTML,
     GantryHTTPServer,
@@ -373,7 +375,21 @@ class WebAppTests(unittest.TestCase):
         self.server.game = FakeGame()
         self.server.ai_arena = FakeArena()
         self.server.commissioning = FakeCommissioning()
-        self.server.station_game = StationGame(root, self.config, demo=True)
+        challenge = OpenChallenge(
+            "game1234",
+            "https://lichess.org/game1234?color=white",
+            "https://lichess.org/game1234?color=black",
+            "https://lichess.org/game1234",
+        )
+        self.server.station_game = LichessStation(
+            root,
+            self.config,
+            demo=True,
+            challenge_factory=lambda **kwargs: challenge,
+            client=FakeClient([]),
+            pgn_fetcher=lambda *args, **kwargs: '[Event "Station"]\n[Result "*"]\n\n*\n',
+            sleep=lambda value: time.sleep(0.01),
+        )
         self.server.openai_opponent = FakeOpponent()
         self.server.lichess_oauth = FakeOAuth()
         self.server.clerk_verifier = None
@@ -436,50 +452,30 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("Generate 4 references", html)
         self.assertIn("Auto-calibrate ArUco", html)
 
-    def test_station_pages_qr_join_and_moves_work_without_authentication(self):
+    def test_station_page_generates_fixed_color_lichess_qr_codes(self):
         with urllib.request.urlopen(self.base + "/station") as response:
             station_html = response.read().decode()
-        self.assertIn("Two-player station game", station_html)
+        self.assertIn("Token-free Lichess game", station_html)
         self.assertNotIn("gradient", station_html)
         self.assertNotIn("border-radius:18px", station_html)
-        with urllib.request.urlopen(self.base + "/station/play") as response:
-            player_html = response.read().decode()
-        self.assertIn("Joining station", player_html)
         _, created = self.request(
             "/api/station/create",
             {"confirmation": STATION_CONFIRMATION, "base_url": self.base},
         )
         urls = created["result"]["join_urls"]
-        tokens = {color: url.rsplit("#", 1)[1] for color, url in urls.items()}
+        self.assertEqual(urls["white"], "https://lichess.org/game1234?color=white")
+        self.assertEqual(urls["black"], "https://lichess.org/game1234?color=black")
         with urllib.request.urlopen(
             self.base + "/api/station/qr?seat=white"
         ) as response:
             self.assertEqual(response.headers.get_content_type(), "image/svg+xml")
             self.assertIn(b"<svg", response.read())
-        self.request("/api/station/join", {"token": tokens["white"]})
-        self.request("/api/station/join", {"token": tokens["black"]})
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
-            _, status = self.request("/api/station/state", {"token": tokens["white"]})
-            if status["result"]["state"] == "playing":
-                break
-            time.sleep(0.01)
-        self.assertEqual(status["result"]["state"], "playing")
-        _, moved = self.request(
-            "/api/station/move",
-            {"token": tokens["white"], "uci": "e2e4", "expected_ply": 0},
-        )
-        self.assertEqual(moved["result"]["turn"], "black")
-        self.assertIsNone(moved["result"]["expires_at"])
-        _, left = self.request("/api/station/leave", {"token": tokens["white"]})
-        self.assertEqual(left["result"]["state"], "finished")
+        self.server.station_game.stop()
         _, next_game = self.request(
             "/api/station/create",
             {"confirmation": STATION_CONFIRMATION, "base_url": "ignored"},
         )
-        self.assertNotEqual(
-            next_game["result"]["game_id"], created["result"]["game_id"]
-        )
+        self.assertEqual(next_game["result"]["game_id"], "game1234")
 
     def test_station_reservation_blocks_other_gantry_modes(self):
         self.request(
