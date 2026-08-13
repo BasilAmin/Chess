@@ -144,10 +144,10 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(service.store.load().revision, 0)
             self.assertFalse(journal_path.exists())
             commands = plan.program.commands
-            self.assertIn("M106 P0 S160", commands)
+            self.assertIn("M106 P0 S190", commands)
             self.assertIn("M107 P0", commands)
             self.assertLess(
-                commands.index("M106 P0 S160"),
+                commands.index("M106 P0 S190"),
                 commands.index("G1 X122 Y178 Z200 F3000"),
             )
 

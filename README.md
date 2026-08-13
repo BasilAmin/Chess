@@ -720,10 +720,11 @@ station cannot bypass that upstream anti-cheating policy without participant
 OAuth. The local six-move/backlog shutdown is removed, so delayed batches are
 now caught up instead of stopping the gantry.
 
-Board moves now use `M106 P0 S160` to reduce attraction to neighboring pieces.
+Board moves now use `M106 P0 S190` to improve pickup reliability while remaining
+below full capture power.
 Capture ejection retains `M106 P0 S255` for a secure long carry. These values
 must be physically validated with the heaviest piece; increase only
-`magnet.move_on_commands` if `S160` does not hold reliably.
+`magnet.move_on_commands` in small increments if `S190` does not hold reliably.
 
 Capture transport uses the dedicated `motion.capture_drag_feed_mm_min` setting:
 `3000 mm/min` in the commissioned physical configuration and `12000 mm/min` in
