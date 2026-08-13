@@ -225,6 +225,51 @@ class MirrorTests(unittest.TestCase):
         completed = session._execute_remote_prefix(cursor, remote)
         self.assertEqual(completed.moves, remote)
 
+    def test_public_polling_finishes_moves_after_five_ply_stall(self):
+        moves = (
+            "e2e4",
+            "e7e5",
+            "f1c4",
+            "g8f6",
+            "d2d3",
+            "d7d5",
+            "e4d5",
+            "f6d5",
+        )
+        responses = iter(
+            (
+                pgn(),
+                pgn(moves[:5]),
+                TimeoutError("temporary export timeout"),
+                pgn(moves[:5]),
+                pgn(moves, result="0-1"),
+            )
+        )
+
+        def fetcher(*args, **kwargs):
+            value = next(responses)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        session = LichessMirror(
+            game_id="game1234",
+            config=self.config,
+            root=self.root,
+            execute=False,
+            demo=False,
+            fast=True,
+            stream_mode="public",
+            terminal=MirrorTerminal(StringIO(), screen=False),
+            client=FakeClient(()),
+            pgn_fetcher=fetcher,
+            sleep=lambda value: None,
+        )
+        cursor = session.run()
+        self.assertEqual(cursor.moves, moves)
+        self.assertEqual(cursor.result, "0-1")
+        self.assertEqual(cursor.physical_revision, 10)
+
     def test_capture_ejects_piece_and_continues(self):
         session = self.session(execute=False)
         cursor = session._initialize()
@@ -427,7 +472,7 @@ class MirrorTests(unittest.TestCase):
                         cursor = session._execute_ply(cursor, uci)
                     self.assertEqual(cursor.moves, sequence)
                     self.assertGreater(len(session.link.commands), len(sequence))
-                    self.assertIn("M106 P0 S190", session.link.commands)
+                    self.assertIn("M106 P0 S210", session.link.commands)
                     self.assertIn("M107 P0", session.link.commands)
                 finally:
                     session.link.close()

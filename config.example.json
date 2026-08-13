@@ -38,7 +38,7 @@
   },
   "magnet": {
     "on_commands": ["M106 P0 S255"],
-    "move_on_commands": ["M106 P0 S190"],
+    "move_on_commands": ["M106 P0 S210"],
     "capture_on_commands": ["M106 P0 S255"],
     "off_commands": ["M107 P0"]
   },

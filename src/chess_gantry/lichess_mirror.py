@@ -558,6 +558,10 @@ class LichessMirror:
             self.link.connect()
             self.service.home_with_link(self.link)
         try:
+            if self.stream_mode == "public" or (
+                self.stream_mode == "auto" and not self.token
+            ):
+                return self._run_public_polling(cursor, board, once=once)
             reconnect_delay = 1.0
             while True:
                 try:
@@ -628,3 +632,39 @@ class LichessMirror:
                 self.link.best_effort((*self.config.magnet.off_commands, "M211 S1"))
                 self.link.close()
                 self.link = None
+
+    def _run_public_polling(
+        self, cursor: MirrorCursor, board: Any, *, once: bool
+    ) -> MirrorCursor:
+        retry_delay = 2.0
+        while True:
+            try:
+                pgn = self.pgn_fetcher(self.game_id, token=None, client=self.client)
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                self.terminal.render(
+                    board,
+                    game_id=self.game_id,
+                    state="reconnecting",
+                    cursor=cursor,
+                    message=f"Public PGN error: {exc}; retrying in {retry_delay:g}s",
+                )
+                self.sleep(retry_delay)
+                retry_delay = min(60.0, retry_delay * 2.0)
+                continue
+            snapshot, status, result = _game_snapshot(pgn)
+            cursor = self._execute_remote_prefix(cursor, snapshot)
+            board = self._board(cursor)
+            cursor = replace(cursor, result=result)
+            cursor.save(self.cursor_path)
+            self.terminal.render(
+                board,
+                game_id=self.game_id,
+                state=status,
+                cursor=cursor,
+            )
+            if status == "finished" or once:
+                return cursor
+            retry_delay = 2.0
+            self.sleep(2.0)

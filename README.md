@@ -524,14 +524,14 @@ an invalid or non-standard game before opening the serial port.
 
 Included replay samples:
 
-| File                                          | Coverage                                                                                               |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `examples/replays/capture-checkmate.pgn`      | Normal capture ending in checkmate                                                                     |
-| `examples/replays/en-passant-castling.pgn`    | En passant, recapture, and kingside castling                                                           |
-| `examples/replays/capture-promotion.pgn`      | Multiple captures and capture-promotion pawn proxy                                                     |
-| `examples/replays/opera-game.pgn`             | Full 33-ply game, captures, queenside castling, sacrifices, and mate                                   |
-| `examples/replays/straight-pawns.pgn`         | 32 plies of straight pawn movement only; no knights, diagonals, captures, or special moves             |
-| `examples/replays/clear-lanes-no-knights.pgn` | Pawn, queen, bishop, and rook development with no knights; every diagonal has at least 30 mm clearance |
+| File                                          | Coverage                                                                                                                                               |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `examples/replays/capture-checkmate.pgn`      | Normal capture ending in checkmate                                                                                                                     |
+| `examples/replays/en-passant-castling.pgn`    | En passant, recapture, and kingside castling                                                                                                           |
+| `examples/replays/capture-promotion.pgn`      | Multiple captures and capture-promotion pawn proxy                                                                                                     |
+| `examples/replays/opera-game.pgn`             | Full 33-ply game, captures, queenside castling, sacrifices, and mate                                                                                   |
+| `examples/replays/straight-pawns.pgn`         | 32 plies of straight pawn movement only; no knights, diagonals, captures, or special moves                                                             |
+| `examples/replays/clear-lanes-no-knights.pgn` | 40-ply exhibition with pawn development, queen files/ranks, rook lifts, king sidesteps, no knights, and bishop diagonals with at least 30 mm clearance |
 
 One-command physical launchers:
 
@@ -739,11 +739,11 @@ station cannot bypass that upstream anti-cheating policy without participant
 OAuth. The local six-move/backlog shutdown is removed, so delayed batches are
 now caught up instead of stopping the gantry.
 
-Board moves now use `M106 P0 S190` to improve pickup reliability while remaining
+Board moves now use `M106 P0 S210` to improve pickup reliability while remaining
 below full capture power.
 Capture ejection retains `M106 P0 S255` for a secure long carry. These values
 must be physically validated with the heaviest piece; increase only
-`magnet.move_on_commands` in small increments if `S190` does not hold reliably.
+`magnet.move_on_commands` in small increments if `S210` does not hold reliably.
 
 Capture transport uses the dedicated `motion.capture_drag_feed_mm_min` setting:
 `3000 mm/min` in the commissioned physical configuration and `12000 mm/min` in

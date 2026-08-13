@@ -52,7 +52,7 @@ class ReplayTests(unittest.TestCase):
             "capture-promotion.pgn": (9, "1-0"),
             "opera-game.pgn": (33, "1-0"),
             "straight-pawns.pgn": (32, "1/2-1/2"),
-            "clear-lanes-no-knights.pgn": (22, "1/2-1/2"),
+            "clear-lanes-no-knights.pgn": (40, "1/2-1/2"),
         }
         for name, (plies, result) in expected.items():
             with self.subTest(name=name):
