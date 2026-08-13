@@ -242,6 +242,7 @@ class Workspace:
 class MotionSettings:
     travel_feed_mm_min: float
     drag_feed_mm_min: float
+    capture_drag_feed_mm_min: float
     magnet_on_dwell_ms: int
     magnet_off_dwell_ms: int
     park_after_move: bool
@@ -254,6 +255,7 @@ class MotionSettings:
             {
                 "travel_feed_mm_min",
                 "drag_feed_mm_min",
+                "capture_drag_feed_mm_min",
                 "magnet_on_dwell_ms",
                 "magnet_off_dwell_ms",
                 "park_after_move",
@@ -289,6 +291,14 @@ class MotionSettings:
             drag_feed_mm_min=_number(
                 raw.get("drag_feed_mm_min", 900.0),
                 "motion.drag_feed_mm_min",
+                positive=True,
+            ),
+            capture_drag_feed_mm_min=_number(
+                raw.get(
+                    "capture_drag_feed_mm_min",
+                    raw.get("drag_feed_mm_min", 900.0),
+                ),
+                "motion.capture_drag_feed_mm_min",
                 positive=True,
             ),
             magnet_on_dwell_ms=_integer(
@@ -671,6 +681,10 @@ class AppConfig:
                 raise ConfigurationError("motion park position overlaps a capture slot")
 
         if self.capture.enabled and self.capture.mode == "eject":
+            if self.motion.capture_drag_feed_mm_min > self.motion.travel_feed_mm_min:
+                raise ConfigurationError(
+                    "motion.capture_drag_feed_mm_min cannot exceed motion.travel_feed_mm_min"
+                )
             if self.capture.magnetic_keepout_mm < self.planner.obstacle_keepout_mm:
                 raise ConfigurationError(
                     "capture.magnetic_keepout_mm must be at least planner.obstacle_keepout_mm"

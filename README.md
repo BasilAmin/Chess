@@ -690,6 +690,13 @@ Capture ejection retains `M106 P0 S255` for a secure long carry. These values
 must be physically validated with the heaviest piece; increase only
 `magnet.move_on_commands` if `S160` does not hold reliably.
 
+Capture transport uses the dedicated `motion.capture_drag_feed_mm_min` setting:
+`3000 mm/min` in the commissioned physical configuration and `12000 mm/min` in
+the high-speed example profile. The value cannot exceed the configured travel
+ceiling. Captures are never released kinetically: the gantry completes the
+maximum-clearance route, waits for `M400` at the chute, and switches the magnet
+off only while stationary. This provides fast removal without launching pieces.
+
 ### Physical Claude Vs ChatGPT
 
 Add both provider keys to the ignored `.env.local` file:

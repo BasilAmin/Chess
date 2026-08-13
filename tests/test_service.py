@@ -356,7 +356,7 @@ class ServiceTests(unittest.TestCase):
                 and ("Y0" in command or "Y300" in command)
             )
             self.assertIn(
-                f"F{service.config.motion.drag_feed_mm_min:g}",
+                f"F{service.config.motion.capture_drag_feed_mm_min:g}",
                 commands[edge_move_index],
             )
             self.assertIn("M107 P0", commands[edge_move_index + 1 :])

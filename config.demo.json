@@ -29,6 +29,7 @@
   "motion": {
     "travel_feed_mm_min": 3000.0,
     "drag_feed_mm_min": 600.0,
+    "capture_drag_feed_mm_min": 3000.0,
     "magnet_on_dwell_ms": 300,
     "magnet_off_dwell_ms": 300,
     "park_after_move": true,

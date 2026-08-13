@@ -152,6 +152,24 @@ class ConfigAndGCodeTests(unittest.TestCase):
         commands = GCodeGenerator(config).generate([transfer]).commands
         self.assertIn("M106 P0 S255", commands)
         self.assertNotIn("M106 P0 S160", commands)
+        capture_moves = [command for command in commands if command.startswith("G1 ")]
+        self.assertTrue(capture_moves)
+        self.assertTrue(
+            all(
+                f"F{config.motion.capture_drag_feed_mm_min:g}" in command
+                for command in capture_moves
+            )
+        )
+        release_index = commands.index("M107 P0", commands.index("M106 P0 S255"))
+        self.assertTrue(commands[release_index - 1].startswith("M400"))
+
+    def test_capture_feed_cannot_exceed_travel_ceiling(self) -> None:
+        raw = self.raw_config()
+        raw["motion"]["capture_drag_feed_mm_min"] = (
+            raw["motion"]["travel_feed_mm_min"] + 1
+        )
+        with self.assertRaisesRegex(ConfigurationError, "cannot exceed"):
+            AppConfig.from_mapping(raw)
 
 
 if __name__ == "__main__":

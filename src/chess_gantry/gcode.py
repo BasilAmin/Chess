@@ -90,10 +90,15 @@ class GCodeGenerator:
             )
             for waypoint in transfer.path[1:]:
                 outer_x, outer_y = self._outer_axes(waypoint.y)
+                drag_feed = (
+                    self.config.motion.capture_drag_feed_mm_min
+                    if transfer.purpose == "capture"
+                    else self.config.motion.drag_feed_mm_min
+                )
                 lines.append(
                     f"G1 X{_format_number(outer_x)} Y{_format_number(outer_y)} "
                     f"Z{_format_number(waypoint.x)} "
-                    f"F{_format_number(self.config.motion.drag_feed_mm_min)}"
+                    f"F{_format_number(drag_feed)}"
                 )
             lines.extend(
                 [
