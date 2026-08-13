@@ -102,6 +102,7 @@ class GameReplay:
         self.move_delay_s = move_delay_s
         session_kind = "demo" if demo else "physical" if execute else "simulation"
         directory = root / "data" / "chess-replay" / self.game.replay_id / session_kind
+        self.metadata_path = directory / "replay.json"
         empty_pgn = '[Event "Replay initialization"]\n[Result "*"]\n\n*\n'
         self.mirror = LichessMirror(
             game_id=self.game.replay_id,
@@ -133,12 +134,57 @@ class GameReplay:
             self.mirror.state_path,
             self.mirror.journal_path,
             self.mirror.audit_path,
+            self.metadata_path,
         ):
             path.unlink(missing_ok=True)
+
+    def has_saved_position(self) -> bool:
+        if not self.mirror.cursor_path.exists():
+            return False
+        cursor = MirrorCursor.load(self.mirror.cursor_path, self.game.replay_id)
+        return bool(cursor.moves or cursor.pending_uci)
+
+    def _motion_fingerprint(self) -> str:
+        config = self.mirror.config
+        value = {
+            "board": asdict(config.board),
+            "workspace": asdict(config.workspace),
+            "motion": asdict(config.motion),
+            "magnet": asdict(config.magnet),
+            "planner": asdict(config.planner),
+            "capture": asdict(config.capture),
+            "home_commands": list(config.safety.home_commands),
+        }
+        canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        return sha256(canonical).hexdigest()
+
+    def validate_session(self, *, create: bool = False) -> None:
+        expected = {
+            "schema_version": 1,
+            "replay_id": self.game.replay_id,
+            "moves": list(self.game.moves),
+            "motion_config_sha256": self._motion_fingerprint(),
+        }
+        if self.metadata_path.exists():
+            if read_json(self.metadata_path) != expected:
+                raise ConfigurationError(
+                    "replay session does not match this move list or motion configuration; "
+                    "restore the previous configuration or reset from the standard position"
+                )
+            return
+        if self.mirror.cursor_path.exists() or self.mirror.state_path.exists():
+            raise ConfigurationError(
+                "replay state exists without its motion-configuration metadata"
+            )
+        if create:
+            atomic_write_json(self.metadata_path, expected)
+        else:
+            raise ConfigurationError("replay session has not been started")
 
     def run(self, *, max_plies: Optional[int] = None) -> MirrorCursor:
         if max_plies is not None and max_plies <= 0:
             raise ValidationError("replay max plies must be greater than zero")
+        self.validate_session(create=True)
         cursor = self.mirror._initialize()
         if (
             len(cursor.moves) > len(self.game.moves)
@@ -159,6 +205,9 @@ class GameReplay:
         if max_plies is not None:
             remaining = remaining[:max_plies]
         if not remaining:
+            if cursor.result != self.game.result:
+                cursor = replace(cursor, result=self.game.result)
+                cursor.save(self.mirror.cursor_path)
             return cursor
         if self.execute:
             link_type = DemoMarlinSerial if self.demo else MarlinSerial

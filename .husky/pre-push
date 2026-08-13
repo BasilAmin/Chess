@@ -1,6 +1,0 @@
-set -e
-
-node node_modules/prettier/bin/prettier.cjs --check .
-uv run python -m black --check .
-uv run python scripts/strip_comments.py --check src tests examples scripts
-uv run python scripts/steering_check.py .

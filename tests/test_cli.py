@@ -129,6 +129,8 @@ class RunCommandTests(unittest.TestCase):
                 "3",
                 "--reset-session",
                 "--no-screen",
+                "--physical-confirmation",
+                "REPLAY BOARD AND CHUTES READY",
             ]
         )
         self.assertEqual(args.command, "replay-game")
@@ -136,6 +138,7 @@ class RunCommandTests(unittest.TestCase):
         self.assertEqual(args.move_delay, 0.5)
         self.assertEqual(args.max_plies, 3)
         self.assertTrue(args.reset_session)
+        self.assertEqual(args.physical_confirmation, "REPLAY BOARD AND CHUTES READY")
 
     def test_web_defaults_to_unauthenticated_loopback(self) -> None:
         from chess_gantry.cli import _parser

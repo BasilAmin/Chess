@@ -24,6 +24,8 @@ from .models import BoardState
 from .openai_opponent import ClaudeChessOpponent, SolChessOpponent
 from .serial_link import discover_serial_ports
 from .service import GantryService
+from .station_game import StationGame, qr_svg
+from .station_web import STATION_HTML, STATION_PLAYER_HTML
 from .vision import DEFAULT_PHONE_SOURCE, SolVisionManager
 
 
@@ -155,6 +157,17 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _commissioning(self) -> CommissioningStore:
         return self.server.commissioning
 
+    def _station(self) -> StationGame:
+        return self.server.station_game
+
+    def _station_player_endpoint(self, path: str) -> bool:
+        return path in {
+            "/api/station/join",
+            "/api/station/state",
+            "/api/station/move",
+            "/api/station/resign",
+        }
+
     def _analysis_board(self) -> Any:
         import chess
 
@@ -189,11 +202,31 @@ class RequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             self._html(self.server.dashboard_html)
             return
+        if parsed.path == "/station/play":
+            self._html(STATION_PLAYER_HTML)
+            return
         if not self._authenticated():
             self._json({"ok": False, "error": "authentication required"}, 401)
             return
         if parsed.path == "/camera":
             self._html(CAMERA_HTML)
+        elif parsed.path == "/station":
+            self._html(STATION_HTML)
+        elif parsed.path == "/api/station/status":
+            self._json({"ok": True, "result": self._station().admin_status()})
+        elif parsed.path == "/api/station/qr":
+            seat = parse_qs(parsed.query).get("seat", [""])[0]
+            urls = self._station().admin_status().get("join_urls", {})
+            if seat not in urls:
+                self._json({"ok": False, "error": "station seat is unavailable"}, 404)
+                return
+            body = qr_svg(urls[seat])
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path == "/api/full-status":
             try:
                 camera = self._camera().status()
@@ -305,22 +338,52 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": "not found"}, 404)
 
     def do_POST(self) -> None:
-        if not self._authenticated():
+        parsed = urlsplit(self.path)
+        if not self._station_player_endpoint(parsed.path) and not self._authenticated():
             self._json({"ok": False, "error": "authentication required"}, 401)
             return
         try:
-            if self.path == "/api/camera/browser-frame":
+            if parsed.path == "/api/camera/browser-frame":
                 result = self._camera().ingest_browser_jpeg(self._raw_body(8_000_000))
                 self._json({"ok": True, "result": result})
                 return
             payload = self._payload()
-            if self.path == "/api/controller/connect":
+            if parsed.path == "/api/station/join":
+                result = self._station().join(str(payload.get("token", "")))
+            elif parsed.path == "/api/station/state":
+                result = self._station().player_status(str(payload.get("token", "")))
+            elif parsed.path == "/api/station/move":
+                result = self._station().move(
+                    str(payload.get("token", "")), str(payload.get("uci", ""))
+                )
+            elif parsed.path == "/api/station/resign":
+                result = self._station().resign(str(payload.get("token", "")))
+            elif parsed.path == "/api/station/create":
+                if self._game().running() or self._arena().running():
+                    raise ConfigurationError("stop the current game before station mode")
+                if not self._commissioning().status()["commissioned"] and not self.controller.demo:
+                    raise ConfigurationError(
+                        "station mode requires completed commissioning attestation"
+                    )
+                if self.controller.connected:
+                    self.controller.disconnect()
+                if self.controller.pending_transaction() is not None:
+                    raise ConfigurationError(
+                        "reconcile the pending physical transaction before station mode"
+                    )
+                result = self._station().create(
+                    base_url=str(payload.get("base_url", "")),
+                    confirmation=str(payload.get("confirmation", "")),
+                )
+            elif parsed.path == "/api/station/stop":
+                result = self._station().stop()
+            elif parsed.path == "/api/controller/connect":
                 baudrate = payload.get("baudrate")
                 result = self.controller.connect(
                     port=str(payload.get("port", "")).strip() or None,
                     baudrate=int(baudrate) if baudrate not in {None, ""} else None,
                 )
-            elif self.path == "/api/controller/disconnect":
+            elif parsed.path == "/api/controller/disconnect":
                 result = self.controller.disconnect()
             elif self.path == "/api/controller/home":
                 result = self.controller.home_xy()
@@ -583,6 +646,7 @@ def run_web_server(
         opponent=opponent,
     )
     arena = AIArena(opponent, claude, config=config, root=root, demo=demo)
+    station = StationGame(root, config, demo=demo)
     commissioning = CommissioningStore(
         root / "data" / "commissioning.json", root / "config.json"
     )
@@ -597,6 +661,7 @@ def run_web_server(
     server.lichess_oauth = oauth
     server.openai_opponent = opponent
     server.ai_arena = arena
+    server.station_game = station
     server.commissioning = commissioning
     server.clerk_verifier = ClerkVerifier(settings) if settings else None
     server.dashboard_html = render_dashboard(HTML, settings) if settings else HTML
@@ -615,6 +680,8 @@ def run_web_server(
             game.stop()
         if arena.running():
             arena.stop()
+        if station.active():
+            station.stop()
         camera.close()
         controller.disconnect()
         server.server_close()

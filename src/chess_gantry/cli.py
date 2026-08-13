@@ -262,12 +262,12 @@ def _parser() -> ArgumentParser:
         type=int,
         help="stop after this many additional plies; the session remains resumable",
     )
-    replay.add_argument(
+    replay_actions = replay.add_mutually_exclusive_group()
+    replay_actions.add_argument(
         "--reset-session",
         action="store_true",
         help="discard this replay's cursor/state and start from the standard position",
     )
-    replay_actions = replay.add_mutually_exclusive_group()
     replay_actions.add_argument(
         "--status", action="store_true", help="print replay cursor and physical state"
     )
@@ -287,10 +287,13 @@ def _parser() -> ArgumentParser:
         help="required for replay reconciliation actions",
     )
     replay.add_argument("--confirm-motion", action="store_true")
-    replay.add_argument("--confirm-standard-position", action="store_true")
     replay.add_argument("--confirm-clear-path", action="store_true")
     replay.add_argument("--confirm-capture-chutes", action="store_true")
     replay.add_argument("--confirm-high-speed", action="store_true")
+    replay.add_argument(
+        "--physical-confirmation",
+        help="exact fresh-board, saved-position, or recovery confirmation phrase",
+    )
     replay.add_argument("--unicode", action="store_true")
     replay.add_argument("--no-screen", action="store_true")
     commands.add_parser("ports", help="list ranked serial ports visible to pyserial")
@@ -1199,21 +1202,14 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             return 0
 
         if args.command == "replay-game":
-            from .game_replay import GameReplay
+            from .game_replay import (
+                FRESH_CONFIRMATION,
+                RECOVERY_CONFIRMATION,
+                RESUME_CONFIRMATION,
+                GameReplay,
+            )
             from .lichess_mirror import MirrorCursor, MirrorTerminal
 
-            if args.execute:
-                required = (
-                    (args.confirm_motion, "--confirm-motion"),
-                    (args.confirm_standard_position, "--confirm-standard-position"),
-                    (args.confirm_clear_path, "--confirm-clear-path"),
-                    (args.confirm_capture_chutes, "--confirm-capture-chutes"),
-                )
-                missing = [flag for confirmed, flag in required if not confirmed]
-                if missing:
-                    parser.error("physical replay-game requires " + ", ".join(missing))
-                if not args.configured_speed and not args.confirm_high_speed:
-                    parser.error("fast replay-game requires --confirm-high-speed")
             action_on_physical_state = (
                 args.status or args.mark_applied or args.discard_pending
             )
@@ -1231,7 +1227,30 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                     title="Chess Gantry Game Replay",
                 ),
             )
+            if args.reset_session:
+                replay_session.reset()
+            if args.execute:
+                required = (
+                    (args.confirm_motion, "--confirm-motion"),
+                    (args.confirm_clear_path, "--confirm-clear-path"),
+                    (args.confirm_capture_chutes, "--confirm-capture-chutes"),
+                )
+                missing = [flag for confirmed, flag in required if not confirmed]
+                if missing:
+                    parser.error("physical replay-game requires " + ", ".join(missing))
+                expected_confirmation = (
+                    RESUME_CONFIRMATION
+                    if replay_session.has_saved_position()
+                    else FRESH_CONFIRMATION
+                )
+                if args.physical_confirmation != expected_confirmation:
+                    parser.error(
+                        f"physical replay-game requires exact confirmation: {expected_confirmation}"
+                    )
+                if not args.configured_speed and not args.confirm_high_speed:
+                    parser.error("fast replay-game requires --confirm-high-speed")
             if args.status:
+                replay_session.validate_session()
                 cursor = MirrorCursor.load(
                     replay_session.mirror.cursor_path, replay_session.game.replay_id
                 )
@@ -1255,17 +1274,19 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                 )
                 return 0
             if args.mark_applied or args.discard_pending:
-                if not args.confirm_physical_state:
+                if (
+                    not args.confirm_physical_state
+                    or args.physical_confirmation != RECOVERY_CONFIRMATION
+                ):
                     parser.error(
-                        "replay reconciliation requires --confirm-physical-state"
+                        f"replay reconciliation requires --confirm-physical-state and exact confirmation: {RECOVERY_CONFIRMATION}"
                     )
+                replay_session.validate_session()
                 if args.mark_applied:
                     replay_session.mirror.service.reconcile_mark_applied()
                 else:
                     replay_session.mirror.service.reconcile_discard()
                 return 0
-            if args.reset_session:
-                replay_session.reset()
             replay_session.run(max_plies=args.max_plies)
             return 0
 

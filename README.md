@@ -504,6 +504,14 @@ The physical script requires the exact confirmation:
 REPLAY BOARD AND CHUTES READY
 ```
 
+That phrase is valid only for a fresh or `--reset-session` replay with every
+piece in the standard position. To resume a partial physical replay, leave the
+board matching the saved midgame state and type:
+
+```text
+REPLAY BOARD MATCHES SAVED STATE
+```
+
 Replay uses the same move validation, persistent physical piece IDs, magnetic
 capture routing, en passant handling, castling buffer, promotion proxy, Marlin
 connection, homing, journal, and recovery logic as live mirroring. It accepts
@@ -540,6 +548,9 @@ Replay state is isolated by the PGN's canonical UCI hash under
 `data/chess-replay/REPLAY_ID/{physical,demo,simulation}/`. Re-running a completed
 session sends no duplicate moves and does not home. To physically replay it from the beginning,
 return every piece to the standard position and pass `--reset-session`.
+Each session persists a fingerprint of board geometry, workspace, motion,
+magnet, planner, capture, and homing settings. Resume fails if those settings
+change, preventing old logical state from being applied with new coordinates.
 
 Inspect or reconcile an interrupted physical replay using the same PGN:
 
@@ -557,7 +568,7 @@ Reconciliation requires the exact confirmation
 `REPLAY PHYSICAL STATE VERIFIED`. Reset refuses to remove a pending transaction.
 
 Software validation cannot certify mechanical perfection. Before relying on a
-live game, run all three samples in `--demo`, then physically replay them at
+live game, run all four samples in `--demo`, then physically replay them at
 configured speed while observing chute clearance, magnet pickup/release, and
 castling buffer placement. The repository verifies legal/state/transaction/path
 behavior, but only a real gantry run can validate alignment, friction, magnet

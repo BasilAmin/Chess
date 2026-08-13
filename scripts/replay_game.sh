@@ -28,13 +28,16 @@ if [[ " ${*:-} " == *" --mark-applied "* || " ${*:-} " == *" --discard-pending "
     exit 1
   fi
   exec uv run chess-gantry --config config.json replay-game "$PGN" \
-    --confirm-physical-state "$@"
+    --confirm-physical-state \
+    --physical-confirmation "$recovery" "$@"
 fi
 
-printf 'This will home the gantry and replay %s from the standard position.\n' "$PGN"
+printf 'This will home the gantry and replay or resume %s.\n' "$PGN"
 printf 'Install the capture tray and clear both chutes and castling buffers.\n'
-read -r -p 'Type REPLAY BOARD AND CHUTES READY to continue: ' confirmation
-if [[ "$confirmation" != "REPLAY BOARD AND CHUTES READY" ]]; then
+printf 'Fresh/reset: place the standard position and type REPLAY BOARD AND CHUTES READY.\n'
+printf 'Resume: leave the saved midgame position and type REPLAY BOARD MATCHES SAVED STATE.\n'
+read -r -p 'Physical board confirmation: ' confirmation
+if [[ "$confirmation" != "REPLAY BOARD AND CHUTES READY" && "$confirmation" != "REPLAY BOARD MATCHES SAVED STATE" ]]; then
   printf 'Replay cancelled.\n' >&2
   exit 1
 fi
@@ -42,8 +45,8 @@ fi
 exec uv run chess-gantry --config config.json replay-game "$PGN" \
   --execute \
   --confirm-motion \
-  --confirm-standard-position \
   --confirm-clear-path \
   --confirm-capture-chutes \
   --confirm-high-speed \
+  --physical-confirmation "$confirmation" \
   "$@"

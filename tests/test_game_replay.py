@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from dataclasses import replace
 import json
 import unittest
 
@@ -58,6 +59,16 @@ class ReplayTests(unittest.TestCase):
                 self.assertEqual(first.replay_id, second.replay_id)
                 self.assertRegex(first.replay_id, r"^rp[0-9a-f]{24}$")
 
+    def test_result_metadata_does_not_split_identical_physical_replay(self) -> None:
+        first = self.root / "first.pgn"
+        second = self.root / "second.pgn"
+        first.write_text('[Event "One"]\n[Result "*"]\n\n1. e4 *\n')
+        second.write_text('[Event "Two"]\n[Result "1-0"]\n\n1. e4 1-0\n')
+        self.assertEqual(
+            load_replay_game(first).replay_id,
+            load_replay_game(second).replay_id,
+        )
+
     def test_replay_resumes_exact_prefix_without_duplicate_moves(self) -> None:
         replay = self.replay("en-passant-castling.pgn")
         partial = replay.run(max_plies=5)
@@ -111,12 +122,48 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(rerun.physical_revision, completed.physical_revision)
         self.assertIsNone(replay.mirror.link)
 
+    def test_completed_replay_repairs_result_after_interrupted_final_write(
+        self,
+    ) -> None:
+        replay = self.replay("capture-checkmate.pgn")
+        completed = replay.run()
+        broken = replace(completed, result="*")
+        broken.save(replay.mirror.cursor_path)
+        repaired = replay.run()
+        self.assertEqual(repaired.result, "1-0")
+        self.assertEqual(repaired.physical_revision, completed.physical_revision)
+
     def test_reset_refuses_to_delete_pending_recovery_evidence(self) -> None:
         replay = self.replay("capture-checkmate.pgn")
         replay.run(max_plies=1)
         replay.mirror.journal_path.write_text('{"pending": true}\n')
         with self.assertRaisesRegex(ConfigurationError, "reconcile"):
             replay.reset()
+
+    def test_resume_rejects_motion_configuration_change(self) -> None:
+        replay = self.replay("capture-checkmate.pgn")
+        replay.run(max_plies=1)
+        changed = replace(
+            self.config,
+            board=replace(self.config.board, origin_x_mm=41.0),
+        )
+        resumed = GameReplay(
+            source=SAMPLES / "capture-checkmate.pgn",
+            config=changed,
+            root=self.root,
+            execute=False,
+            demo=False,
+            fast=True,
+            terminal=MirrorTerminal(StringIO(), screen=False),
+        )
+        with self.assertRaisesRegex(ConfigurationError, "motion configuration"):
+            resumed.run()
+
+    def test_saved_position_detection_distinguishes_fresh_and_resume(self) -> None:
+        replay = self.replay("capture-checkmate.pgn")
+        self.assertFalse(replay.has_saved_position())
+        replay.run(max_plies=1)
+        self.assertTrue(replay.has_saved_position())
 
     def test_invalid_multi_game_and_nonstandard_pgn_are_rejected(self) -> None:
         multi = self.root / "multi.pgn"
@@ -131,6 +178,24 @@ class ReplayTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ConfigurationError, "standard chess"):
             load_replay_game(custom)
+
+    def test_invalid_result_mismatch_and_trailing_content_are_rejected(self) -> None:
+        invalid = self.root / "invalid-result.pgn"
+        invalid.write_text('[Event "Bad"]\n[Result "banana"]\n\n1. e4 banana\n')
+        with self.assertRaisesRegex(ValidationError, "result token"):
+            load_replay_game(invalid)
+        mismatch = self.root / "mismatch.pgn"
+        mismatch.write_text('[Event "Bad"]\n[Result "1-0"]\n\n1. e4 0-1\n')
+        with self.assertRaisesRegex(ValidationError, "does not match"):
+            load_replay_game(mismatch)
+        trailing = self.root / "trailing.pgn"
+        trailing.write_text('[Event "Bad"]\n[Result "*"]\n\n1. e4 * garbage\n')
+        with self.assertRaisesRegex(ValidationError, "result token"):
+            load_replay_game(trailing)
+        setup = self.root / "setup.pgn"
+        setup.write_text('[Event "Bad"]\n[SetUp "1"]\n[Result "*"]\n\n1. e4 *\n')
+        with self.assertRaisesRegex(ConfigurationError, "standard chess"):
+            load_replay_game(setup)
 
     def test_negative_delay_and_nonpositive_limit_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValidationError, "delay"):
