@@ -7,6 +7,7 @@ from pathlib import Path
 from secrets import token_urlsafe
 from threading import RLock, Thread
 from typing import Any, Optional
+import hmac
 import time
 import uuid
 import json
@@ -62,6 +63,7 @@ class StationGame:
         self._base_url: Optional[str] = None
         self._metadata_path: Optional[Path] = None
         self._draw_offer: Optional[str] = None
+        self._generation = 0
         self._restore_latest()
 
     def _new_mirror(self, game_id: str, directory: Path) -> LichessMirror:
@@ -88,7 +90,8 @@ class StationGame:
             "magnet": asdict(self.config.magnet),
             "planner": asdict(self.config.planner),
             "capture": asdict(self.config.capture),
-            "home_commands": list(self.config.safety.home_commands),
+            "serial": asdict(self.config.serial),
+            "safety": asdict(self.config.safety),
         }
         canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
         return sha256(canonical).hexdigest()
@@ -120,6 +123,7 @@ class StationGame:
             mirror = self._new_mirror(game_id, metadata_path.parent)
             cursor = MirrorCursor.load(mirror.cursor_path, game_id)
             board = mirror._board(cursor)
+            outcome = board.outcome(claim_draw=False)
             history = []
             replay = chess.Board()
             for ply, uci in enumerate(cursor.moves, start=1):
@@ -169,63 +173,72 @@ class StationGame:
             self._base_url = value.get("base_url")
             self._metadata_path = metadata_path
             self._draw_offer = value.get("draw_offer")
+            if outcome is not None and not cursor.pending_uci:
+                self._result = outcome.result()
+                self._state = "finished"
+                self._save_metadata()
             return
 
     def active(self) -> bool:
         with self._lock:
-            return self._state not in {"idle", "finished", "stopped", "failed"}
+            return self._state not in {"idle", "finished", "stopped"}
+
+    def reserves_hardware(self) -> bool:
+        return self.active()
 
     def create(self, *, base_url: str, confirmation: str) -> dict[str, Any]:
         if confirmation != STATION_CONFIRMATION:
             raise ValidationError(f"type exactly: {STATION_CONFIRMATION}")
         if not base_url.startswith(("http://", "https://")):
             raise ValidationError("station base URL must be HTTP or HTTPS")
-        pending = tuple(self.root.glob("data/station-games/*/pending_move.json"))
-        if pending:
-            raise ConfigurationError(
-                f"pending station transaction at {pending[0]}; reconcile it before creating another game"
-            )
-        with self._lock:
-            if self.active():
-                raise ConfigurationError("a station game is already active")
-            game_id = "st" + uuid.uuid4().hex[:14]
-            tokens = {"white": token_urlsafe(32), "black": token_urlsafe(32)}
-            directory = self.root / "data" / "station-games" / game_id
-            mirror = self._new_mirror(game_id, directory)
-            cursor = mirror._initialize()
-            board = mirror._board(cursor)
-            self._mirror = mirror
-            self._cursor = cursor
-            self._board = board
-            self._game_id = game_id
-            self._tokens = tokens
-            self._token_hashes = {
-                color: sha256(token.encode()).hexdigest()
-                for color, token in tokens.items()
-            }
-            self._joined = {"white": False, "black": False}
-            self._left = {"white": False, "black": False}
-            self._state = "waiting_players"
-            self._error = None
-            self._result = None
-            self._started_at = time.time()
-            self._history = []
-            self._draw_offer = None
-            self._base_url = base_url.rstrip("/")
-            self._metadata_path = directory / "station.json"
-            self._save_metadata()
-            return {
-                **self.admin_status(base_url=self._base_url),
-                "join_urls": {
-                    color: f"{self._base_url}/station/play#{token}"
+        with self._motion_lock:
+            pending = tuple(self.root.glob("data/station-games/*/pending_move.json"))
+            if pending:
+                raise ConfigurationError(
+                    f"pending station transaction at {pending[0]}; reconcile it before creating another game"
+                )
+            with self._lock:
+                if self.active():
+                    raise ConfigurationError("a station game is already active")
+                game_id = "st" + uuid.uuid4().hex[:14]
+                tokens = {"white": token_urlsafe(32), "black": token_urlsafe(32)}
+                directory = self.root / "data" / "station-games" / game_id
+                mirror = self._new_mirror(game_id, directory)
+                cursor = mirror._initialize()
+                board = mirror._board(cursor)
+                self._mirror = mirror
+                self._cursor = cursor
+                self._board = board
+                self._game_id = game_id
+                self._tokens = tokens
+                self._token_hashes = {
+                    color: sha256(token.encode()).hexdigest()
                     for color, token in tokens.items()
-                },
-            }
+                }
+                self._joined = {"white": False, "black": False}
+                self._left = {"white": False, "black": False}
+                self._state = "waiting_players"
+                self._error = None
+                self._result = None
+                self._started_at = time.time()
+                self._history = []
+                self._draw_offer = None
+                self._base_url = base_url.rstrip("/")
+                self._metadata_path = directory / "station.json"
+                self._generation += 1
+                self._save_metadata()
+                return {
+                    **self.admin_status(base_url=self._base_url),
+                    "join_urls": {
+                        color: f"{self._base_url}/station/play#{token}"
+                        for color, token in tokens.items()
+                    },
+                }
 
     def _seat(self, token: str) -> str:
         digest = sha256(token.encode()).hexdigest() if token else ""
         for color, expected in self._token_hashes.items():
-            if digest and digest == expected:
+            if digest and hmac.compare_digest(digest, expected):
                 return color
         raise ValidationError("invalid station seat token")
 
@@ -259,29 +272,53 @@ class StationGame:
             self._save_metadata()
             if all(self._joined.values()) and self._state == "waiting_players":
                 self._state = "homing"
-                Thread(target=self._start_motion, daemon=True).start()
+                generation = self._generation
+                mirror = self._require_mirror()
+                Thread(
+                    target=self._start_motion,
+                    args=(generation, mirror),
+                    daemon=True,
+                ).start()
             return self.player_status(token)
 
-    def _start_motion(self) -> None:
+    def _current_worker(self, generation: int, mirror: LichessMirror) -> bool:
+        return self._generation == generation and self._mirror is mirror
+
+    def _start_motion(self, generation: int, mirror: LichessMirror) -> None:
         try:
-            mirror = self._require_mirror()
             link_type = DemoMarlinSerial if self.demo else MarlinSerial
             link = link_type(mirror.config.serial)
             link.connect()
-            mirror.service.home_with_link(link)
             with self._lock:
-                if self._state != "homing":
-                    link.best_effort((*self.config.magnet.off_commands, "M211 S1"))
+                if (
+                    not self._current_worker(generation, mirror)
+                    or self._state != "homing"
+                ):
                     link.close()
                     return
                 self._link = link
+            mirror.service.home_with_link(link)
+            with self._lock:
+                if (
+                    not self._current_worker(generation, mirror)
+                    or self._state != "homing"
+                ):
+                    link.best_effort((*self.config.magnet.off_commands, "M211 S1"))
+                    link.close()
+                    return
                 self._state = "playing"
+                self._save_metadata()
         except Exception as exc:
             with self._lock:
-                if self._state != "stopped":
+                if (
+                    self._current_worker(generation, mirror)
+                    and self._state != "stopped"
+                ):
                     self._error = str(exc)
                     self._state = "failed"
-            self._close_link()
+                    self._save_metadata()
+            if self._current_worker(generation, mirror):
+                self._close_link()
 
     def _require_mirror(self) -> LichessMirror:
         if self._mirror is None:
@@ -372,6 +409,8 @@ class StationGame:
         color = self._seat(token)
         with self._motion_lock:
             with self._lock:
+                generation = self._generation
+                mirror = self._require_mirror()
                 if expected_ply is not None:
                     if expected_ply < 0:
                         raise ValidationError("expected ply cannot be negative")
@@ -401,13 +440,16 @@ class StationGame:
                 san = self._board.san(move)
                 self._state = "executing"
             try:
-                mirror = self._require_mirror()
                 if self._link is None:
                     raise ConfigurationError("station Marlin connection is unavailable")
                 mirror.link = self._link
                 cursor = mirror._execute_ply(self._cursor, uci)
                 board = mirror._board(cursor)
                 with self._lock:
+                    if not self._current_worker(generation, mirror):
+                        raise ConfigurationError(
+                            "station game changed while the move was executing"
+                        )
                     self._cursor = cursor
                     self._board = board
                     self._history.append(
@@ -420,7 +462,7 @@ class StationGame:
                     )
                     self._draw_offer = None
                     outcome = board.outcome(claim_draw=False)
-                    if self._state == "stopped":
+                    if self._state in {"stopped", "failed"}:
                         pass
                     elif outcome is not None:
                         self._result = outcome.result()
@@ -437,6 +479,7 @@ class StationGame:
                     if self._state != "stopped":
                         self._error = str(exc)
                         self._state = "failed"
+                        self._save_metadata()
                 self._close_link()
                 raise
             if self._state == "finished":
@@ -453,7 +496,13 @@ class StationGame:
                 )
             self._state = "homing"
             self._save_metadata()
-        Thread(target=self._start_motion, daemon=True).start()
+            generation = self._generation
+            mirror = self._require_mirror()
+        Thread(
+            target=self._start_motion,
+            args=(generation, mirror),
+            daemon=True,
+        ).start()
         return self.admin_status()
 
     def resign(self, token: str) -> dict[str, Any]:
@@ -503,18 +552,22 @@ class StationGame:
         with self._lock:
             if self._state == "idle":
                 raise ConfigurationError("there is no station game")
-            self._state = "stopped"
+            executing = self._state == "executing"
+            self._state = "failed" if executing else "stopped"
+            self._error = (
+                "operator emergency stop during a move; verify physical state"
+                if executing
+                else self._error
+            )
+            self._generation += 1
             self._save_metadata()
             link = self._link
+            self._link = None
         if link is not None:
-            link.best_effort(
-                (
-                    *self.config.magnet.off_commands,
-                    self.config.safety.emergency_stop_command,
-                    "M211 S1",
-                )
-            )
-        self._close_link()
+            try:
+                link.emergency_stop(self.config.safety.emergency_stop_command)
+            finally:
+                link.close()
         return self.admin_status()
 
     def reconcile(self, *, applied: bool, confirmation: str) -> dict[str, Any]:
@@ -547,18 +600,28 @@ class StationGame:
                 self._cursor = cursor
                 self._error = None
                 self._state = "homing"
+                generation = self._generation
+                mirror = self._mirror
+                cursor = self._cursor
                 self._save_metadata()
             Thread(
-                target=self._resume_after_reconcile, args=(pending_uci,), daemon=True
+                target=self._resume_after_reconcile,
+                args=(generation, mirror, cursor, pending_uci),
+                daemon=True,
             ).start()
             return self.admin_status()
 
-    def _resume_after_reconcile(self, pending_uci: str) -> None:
+    def _resume_after_reconcile(
+        self,
+        generation: int,
+        mirror: LichessMirror,
+        base_cursor: MirrorCursor,
+        pending_uci: str,
+    ) -> None:
         import chess
 
         try:
-            mirror = self._require_mirror()
-            board_before = mirror._board(self._cursor)
+            board_before = mirror._board(base_cursor)
             move = chess.Move.from_uci(pending_uci)
             if move not in board_before.legal_moves:
                 raise ValidationError(
@@ -569,17 +632,30 @@ class StationGame:
             link_type = DemoMarlinSerial if self.demo else MarlinSerial
             link = link_type(mirror.config.serial)
             link.connect()
-            mirror.service.home_with_link(link)
             with self._lock:
-                if self._state != "homing":
-                    link.best_effort((*self.config.magnet.off_commands, "M211 S1"))
+                if (
+                    not self._current_worker(generation, mirror)
+                    or self._state != "homing"
+                ):
                     link.close()
                     return
                 self._link = link
+            mirror.service.home_with_link(link)
+            with self._lock:
+                if (
+                    not self._current_worker(generation, mirror)
+                    or self._state != "homing"
+                ):
+                    link.best_effort((*self.config.magnet.off_commands, "M211 S1"))
+                    link.close()
+                    return
             mirror.link = link
-            cursor = mirror._execute_ply(self._cursor, pending_uci)
+            cursor = mirror._execute_ply(base_cursor, pending_uci)
             board = mirror._board(cursor)
             with self._lock:
+                if not self._current_worker(generation, mirror):
+                    link.close()
+                    return
                 self._cursor = cursor
                 self._board = board
                 if not self._history or self._history[-1]["ply"] != len(cursor.moves):
@@ -591,14 +667,26 @@ class StationGame:
                             "color": color,
                         }
                     )
-                self._state = "playing"
+                outcome = board.outcome(claim_draw=False)
+                if outcome is not None:
+                    self._result = outcome.result()
+                    self._state = "finished"
+                else:
+                    self._state = "playing"
                 self._save_metadata()
+            if self._state == "finished":
+                self._close_link()
         except Exception as exc:
             with self._lock:
-                if self._state != "stopped":
+                if (
+                    self._current_worker(generation, mirror)
+                    and self._state != "stopped"
+                ):
                     self._error = str(exc)
                     self._state = "failed"
-            self._close_link()
+                    self._save_metadata()
+            if self._current_worker(generation, mirror):
+                self._close_link()
 
     def _close_link(self) -> None:
         with self._lock:

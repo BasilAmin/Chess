@@ -600,21 +600,55 @@ Open `http://STATION_LAN_IP:8000/station` on the operator display. Both phones
 must be able to reach that same LAN address. Before creating a physical game,
 type the exact phrase `STATION BOARD AND CHUTES READY`.
 
+`run.sh` publishes QR links through `http://chess.local` by default. If the
+station uses another stable hostname or HTTPS reverse proxy, set the complete
+origin explicitly:
+
+```bash
+export CHESS_GANTRY_PUBLIC_URL=https://chess-station.example
+./run.sh
+```
+
 Station behavior:
 
 - no Lichess account or external game service is required;
 - no chess clock, idle timeout, game-duration timeout, or ply cutoff exists;
 - phones reconnect by reopening the same scanned seat URL;
+- repeated submissions include the expected ply and are idempotent, so retrying
+  after a lost HTTP response never repeats physical motion;
 - moves are accepted only for that seat, on its turn, from the server-generated
   legal-move allowlist;
 - every move uses the persistent Marlin link and the same capture, en passant,
   castling, promotion-proxy, journal, and path-planning pipeline as mirroring;
 - checkmate, stalemate, automatic rule draws, resignation, operator stop, or a
   hardware failure ends the game and switches the magnet off;
+- either player can offer a draw; the other player's draw action accepts it;
+- **Leave game** awards the game to the opponent and releases the station for
+  the next group;
 - the operator QR/status routes remain behind the configured dashboard auth;
 - seat capabilities are random URL fragments, are removed from browser history,
   never appear in HTTP request URLs, and are stored on disk only as SHA-256
   hashes.
+
+After checkmate, draw, resignation, or leave, return all pieces to the standard
+physical position, replace any ejected or promotion-proxy pieces, keep the
+chutes clear, and press **Create next game**. New random seat tokens and QR codes
+are generated; old QR codes are rejected. The application cannot physically
+reset captured pieces, so this short operator reset is deliberately required
+between groups.
+
+If the station process restarts during an active game, it restores the latest
+cursor, move history, seat capabilities, and board state without moving. Verify
+that the physical board matches the saved position, type
+`STATION BOARD MATCHES SAVED STATE`, and press **Resume saved game**. If a move
+was interrupted, the operator panel instead shows **Physical recovery**. Inspect
+the board, type `STATION PHYSICAL STATE VERIFIED`, and mark whether the move
+completed. The service then homes, finishes only the missing sub-transfers, and
+continues with both phone sessions.
+
+Station state is bound to a fingerprint of board geometry, workspace, planner,
+magnet, capture, motion, and homing configuration. A changed configuration does
+not silently resume old physical coordinates.
 
 The server still retains finite per-command Marlin and network timeouts so a
 failed controller or dead connection cannot hang an actuator operation forever.

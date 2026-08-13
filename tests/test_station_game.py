@@ -224,6 +224,40 @@ class StationGameTests(unittest.TestCase):
         self.assertEqual(accepted["result"], "1/2-1/2")
         self.assertIsNone(self.station._link)
 
+    def test_failed_move_can_be_discarded_and_resumed_exactly_once(self) -> None:
+        from chess_gantry.errors import SerialProtocolError
+
+        tokens = self.tokens(self.create())
+        self.station.join(tokens["white"])
+        self.station.join(tokens["black"])
+        self.wait_playing()
+
+        class FailingLink:
+            connected = True
+
+            def send_program(self, commands):
+                raise SerialProtocolError("simulated lost acknowledgement")
+
+            def best_effort(self, commands):
+                return ()
+
+            def close(self):
+                self.connected = False
+
+        self.station._link = FailingLink()
+        with self.assertRaisesRegex(SerialProtocolError, "lost acknowledgement"):
+            self.station.move(tokens["white"], "e2e4", expected_ply=0)
+        failed = self.station.admin_status()
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(failed["pending_uci"], "e2e4")
+        self.station.reconcile(
+            applied=False, confirmation="STATION PHYSICAL STATE VERIFIED"
+        )
+        self.wait_playing()
+        recovered = self.station.player_status(tokens["white"])
+        self.assertEqual([move["uci"] for move in recovered["history"]], ["e2e4"])
+        self.assertEqual(recovered["turn"], "black")
+
     def test_create_requires_exact_confirmation_and_one_active_game(self) -> None:
         with self.assertRaisesRegex(ValidationError, "STATION BOARD"):
             self.station.create(base_url="http://station", confirmation="yes")
@@ -239,6 +273,14 @@ class StationGameTests(unittest.TestCase):
         pending.write_text("{}\n")
         with self.assertRaisesRegex(ConfigurationError, "pending station transaction"):
             self.create()
+
+    def test_failed_game_reserves_station_until_operator_stops_it(self) -> None:
+        self.create()
+        self.station._state = "failed"
+        with self.assertRaisesRegex(ConfigurationError, "already active"):
+            self.create()
+        self.station.stop()
+        self.assertEqual(self.create()["state"], "waiting_players")
 
     def test_process_restart_restores_midgame_without_motion_until_confirmed(
         self,

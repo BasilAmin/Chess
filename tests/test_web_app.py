@@ -381,6 +381,7 @@ class WebAppTests(unittest.TestCase):
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_port}"
+        self.server.station_public_url = self.base
 
     def tearDown(self):
         if self.server.station_game.active():
@@ -443,7 +444,7 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn("border-radius:18px", station_html)
         with urllib.request.urlopen(self.base + "/station/play") as response:
             player_html = response.read().decode()
-        self.assertIn("Connecting to station", player_html)
+        self.assertIn("Joining station", player_html)
         _, created = self.request(
             "/api/station/create",
             {"confirmation": STATION_CONFIRMATION, "base_url": self.base},
@@ -479,6 +480,37 @@ class WebAppTests(unittest.TestCase):
         self.assertNotEqual(
             next_game["result"]["game_id"], created["result"]["game_id"]
         )
+
+    def test_station_reservation_blocks_other_gantry_modes(self):
+        self.request(
+            "/api/station/create",
+            {"confirmation": STATION_CONFIRMATION},
+        )
+        for path, payload in (
+            ("/api/controller/connect", {}),
+            ("/api/setup/home", {"confirmation": "SETUP AREA CLEAR"}),
+            ("/api/game/start", {"mode": "local", "confirm_motion": True}),
+            (
+                "/api/arena/start",
+                {
+                    "white": "chatgpt",
+                    "black": "claude",
+                    "physical": True,
+                    "confirm_motion": True,
+                },
+            ),
+        ):
+            request = urllib.request.Request(
+                self.base + path,
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with (
+                self.subTest(path=path),
+                self.assertRaises(urllib.error.HTTPError) as raised,
+            ):
+                urllib.request.urlopen(request)
+            self.assertEqual(raised.exception.code, 409)
 
     def test_every_javascript_dom_reference_exists_in_dashboard(self):
         ids = set(re.findall(r'id="([A-Za-z][A-Za-z0-9_-]*)"', HTML))

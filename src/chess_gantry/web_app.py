@@ -197,6 +197,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             "/api/station/draw",
         }
 
+    def _require_station_idle(self) -> None:
+        if self._station().reserves_hardware():
+            raise ConfigurationError(
+                "station game reserves the gantry; finish, stop, or reconcile it first"
+            )
+
     def _analysis_board(self) -> Any:
         import chess
 
@@ -417,7 +423,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "reconcile the pending physical transaction before station mode"
                     )
                 result = self._station().create(
-                    base_url=self.server.station_public_url,
+                    base_url=getattr(
+                        self.server,
+                        "station_public_url",
+                        f"http://{self.headers.get('Host', '127.0.0.1:8000')}",
+                    ),
                     confirmation=str(payload.get("confirmation", "")),
                 )
             elif parsed.path == "/api/station/stop":
@@ -435,38 +445,51 @@ class RequestHandler(BaseHTTPRequestHandler):
                     confirmation=str(payload.get("confirmation", "")),
                 )
             elif parsed.path == "/api/controller/connect":
+                self._require_station_idle()
                 baudrate = payload.get("baudrate")
                 result = self.controller.connect(
                     port=str(payload.get("port", "")).strip() or None,
                     baudrate=int(baudrate) if baudrate not in {None, ""} else None,
                 )
             elif parsed.path == "/api/controller/disconnect":
+                self._require_station_idle()
                 result = self.controller.disconnect()
             elif self.path == "/api/controller/home":
+                self._require_station_idle()
                 result = self.controller.home_xy()
             elif self.path == "/api/controller/stop":
-                result = self.controller.emergency_stop()
+                if self._station().reserves_hardware():
+                    result = self._station().stop()
+                else:
+                    result = self.controller.emergency_stop()
             elif self.path == "/api/setup/diagnostics":
+                self._require_station_idle()
                 result = self.controller.run_setup_diagnostics()
             elif self.path == "/api/setup/endstops":
+                self._require_station_idle()
                 result = self.controller.verify_setup_endstops()
             elif self.path == "/api/setup/home":
+                self._require_station_idle()
                 if payload.get("confirmation") != "SETUP AREA CLEAR":
                     raise ValidationError("type SETUP AREA CLEAR before homing")
                 result = self.controller.home_xy()
             elif self.path == "/api/setup/movement":
+                self._require_station_idle()
                 if payload.get("confirmation") != "SETUP AREA CLEAR":
                     raise ValidationError("type SETUP AREA CLEAR before movement test")
                 result = self.controller.run_setup_movement_test()
             elif self.path == "/api/setup/magnet":
+                self._require_station_idle()
                 if payload.get("confirmation") != "SETUP AREA CLEAR":
                     raise ValidationError("type SETUP AREA CLEAR before magnet test")
                 result = self.controller.run_setup_magnet_test()
             elif self.path == "/api/setup/centers":
+                self._require_station_idle()
                 if payload.get("confirmation") != "SETUP AREA CLEAR":
                     raise ValidationError("type SETUP AREA CLEAR before center test")
                 result = self.controller.run_setup_square_centers()
             elif self.path == "/api/setup/combined":
+                self._require_station_idle()
                 if payload.get("confirmation") != "SETUP AREA CLEAR":
                     raise ValidationError("type SETUP AREA CLEAR before combined setup")
                 result = self.controller.run_setup_combined()
@@ -505,6 +528,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/camera/calibration/clear":
                 result = self._camera().clear_calibration()
             elif self.path == "/api/game/start":
+                self._require_station_idle()
                 if self._arena().running():
                     raise ConfigurationError("stop the Claude vs ChatGPT arena first")
                 if self.controller.connected:
@@ -549,6 +573,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     board, style=str(payload.get("style", "balanced"))
                 ).model_dump()
             elif self.path == "/api/arena/start":
+                self._require_station_idle()
                 if self._game().running():
                     raise ConfigurationError(
                         "stop the current game before starting AI arena"
