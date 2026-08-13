@@ -26,7 +26,7 @@ from .openai_opponent import ClaudeChessOpponent, SolChessOpponent
 from .serial_link import discover_serial_ports
 from .service import GantryService
 from .station_game import qr_svg
-from .lichess_station import LichessStation
+from .lichess_station import LichessStation, STATION_CONFIRMATION
 from .station_web import STATION_HTML
 from .vision import DEFAULT_PHONE_SOURCE, SolVisionManager
 
@@ -717,6 +717,23 @@ def run_web_server(
     server.clerk_verifier = ClerkVerifier(settings) if settings else None
     server.dashboard_html = render_dashboard(HTML, settings) if settings else HTML
     server.station_public_url = station_public_url(host, port)
+    if os.environ.get("CHESS_GANTRY_STATION_AUTOSTART", "") == "1":
+        if controller.pending_transaction() is not None:
+            server.server_close()
+            camera.close()
+            raise ConfigurationError(
+                "station autostart is blocked by a pending physical transaction"
+            )
+        if not demo and not commissioning.status()["commissioned"]:
+            server.server_close()
+            camera.close()
+            raise ConfigurationError(
+                "station autostart requires completed commissioning"
+            )
+        station.create(
+            base_url=server.station_public_url,
+            confirmation=STATION_CONFIRMATION,
+        )
     url = f"http://{host}:{port}"
     print(f"Chess Gantry running at {url}")
     print(f"Station lobby at {server.station_public_url}/station")

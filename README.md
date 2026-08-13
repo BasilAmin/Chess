@@ -529,6 +529,21 @@ Included replay samples:
 | `examples/replays/straight-pawns.pgn`         | 32 plies of straight pawn movement only; no knights, diagonals, captures, or special moves             |
 | `examples/replays/clear-lanes-no-knights.pgn` | Pawn, queen, bishop, and rook development with no knights; every diagonal has at least 30 mm clearance |
 
+One-command physical launchers:
+
+```bash
+./scripts/start_replay.sh
+./scripts/start_mirror.sh GAME_ID
+./scripts/start_station.sh
+```
+
+`start_replay.sh` immediately resets and runs the fast clear-lane replay.
+`start_mirror.sh` immediately homes and mirrors the supplied public Lichess game.
+`start_station.sh` creates an anonymous Lichess challenge automatically, starts
+the station server, and prints the `/station` URL with White and Black QR codes.
+These launchers intentionally contain the physical confirmation flags; use them
+only after the standard position, tray, chutes, and travel area are physically ready.
+
 Run every replay in simulated Marlin mode:
 
 ```bash
