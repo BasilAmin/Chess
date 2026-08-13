@@ -30,6 +30,10 @@ flowchart LR
 > endstops, homing, calibration, workspace clearance, chutes, and collection tray
 > before execution. Software tests cannot certify mechanical safety.
 
+./scripts/start_replay.sh
+./scripts/start_mirror.sh GAME_ID
+./scripts/start_station.sh
+
 ## Current Capabilities
 
 | Capability              | Status                                                          |
