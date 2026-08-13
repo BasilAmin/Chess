@@ -21,7 +21,7 @@ class ConfigAndGCodeTests(unittest.TestCase):
         self.assertTrue(config.safety.calibrated)
         self.assertFalse(config.safety.home_before_execute)
         self.assertEqual(config.magnet.on_commands, ("M106 P0 S255",))
-        self.assertEqual(config.magnet.move_on_commands, ("M106 P0 S210",))
+        self.assertEqual(config.magnet.move_on_commands, ("M106 P0 S100",))
         self.assertEqual(config.magnet.capture_on_commands, ("M106 P0 S255",))
         self.assertEqual(config.magnet.off_commands, ("M107 P0",))
         self.assertEqual(config.serial.command_timeout_s, 300.0)
@@ -116,7 +116,7 @@ class ConfigAndGCodeTests(unittest.TestCase):
             ),
         )
         commands = GCodeGenerator(config).generate([transfer]).commands
-        on_index = commands.index("M106 P0 S210")
+        on_index = commands.index("M106 P0 S100")
         self.assertNotIn("M82", commands)
         self.assertFalse(any(command.startswith("M302") for command in commands))
         self.assertIn("G0 X290 Y10 Z10 F12000", commands)
@@ -151,7 +151,7 @@ class ConfigAndGCodeTests(unittest.TestCase):
         )
         commands = GCodeGenerator(config).generate([transfer]).commands
         self.assertIn("M106 P0 S255", commands)
-        self.assertNotIn("M106 P0 S210", commands)
+        self.assertNotIn("M106 P0 S100", commands)
         capture_moves = [command for command in commands if command.startswith("G1 ")]
         self.assertTrue(capture_moves)
         self.assertTrue(

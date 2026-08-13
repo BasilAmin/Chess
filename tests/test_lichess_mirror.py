@@ -472,7 +472,7 @@ class MirrorTests(unittest.TestCase):
                         cursor = session._execute_ply(cursor, uci)
                     self.assertEqual(cursor.moves, sequence)
                     self.assertGreater(len(session.link.commands), len(sequence))
-                    self.assertIn("M106 P0 S210", session.link.commands)
+                    self.assertIn("M106 P0 S100", session.link.commands)
                     self.assertIn("M107 P0", session.link.commands)
                 finally:
                     session.link.close()
