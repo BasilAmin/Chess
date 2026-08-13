@@ -562,6 +562,41 @@ The physical script requires `REPLAY BOARD AND CHUTES READY` before each game.
 Do not run all physical replays in an unattended shell loop because the gantry
 cannot restore captures, promotions, or the standard starting position itself.
 
+For hours of idle mechanical endurance testing, use the dedicated 20,000-transfer
+routine. It is not a PGN because automatic draw rules make a 20,000-ply
+reversible chess game illegal. The routine moves only the a-file pawns once and
+then shuttles the a-file rooks vertically between adjacent squares. It has no
+captures, diagonals, knights, path crossings, or nearby occupied squares.
+
+Simulation:
+
+```bash
+uv run python scripts/endurance_replay.py \
+  --transfers 20000 --move-delay 0.5 --reset-session
+```
+
+Simulated Marlin:
+
+```bash
+uv run python scripts/endurance_replay.py \
+  --config config.demo.json --demo \
+  --transfers 20000 --move-delay 0.5 --reset-session
+```
+
+Physical endurance run:
+
+```bash
+uv run python scripts/endurance_replay.py \
+  --config config.json --execute \
+  --transfers 20000 --move-delay 0.5 --reset-session \
+  --confirmation "ENDURANCE BOARD AND PATH CLEAR"
+```
+
+The cursor is persisted after every transfer. Re-run the same command without
+`--reset-session` to resume. At `0.5` seconds pause plus physical travel time,
+20,000 transfers run for several hours. Keep the independent emergency cutoff
+within reach; unattended actuator operation is not recommended.
+
 Pause between plies:
 
 ```bash

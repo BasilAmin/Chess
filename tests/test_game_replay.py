@@ -11,6 +11,8 @@ from chess_gantry.config import AppConfig
 from chess_gantry.errors import ConfigurationError, ValidationError
 from chess_gantry.game_replay import GameReplay, load_replay_game
 from chess_gantry.lichess_mirror import MirrorTerminal
+from chess_gantry.models import BoardState
+from scripts.endurance_replay import endurance_move
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -136,6 +138,14 @@ class ReplayTests(unittest.TestCase):
             board.push(move)
         self.assertGreater(diagonal_count, 0)
         self.assertGreater(straight_count, 0)
+
+    def test_endurance_replay_has_20000_straight_noninterfering_transfers(self) -> None:
+        state = BoardState.standard()
+        for index in range(20000):
+            move = endurance_move(index)
+            self.assertEqual(move.previous.x, move.new.x)
+            self.assertIsNone(state.validate_move(move))
+            state = state.applied(move, None)
 
     def test_result_metadata_does_not_split_identical_physical_replay(self) -> None:
         first = self.root / "first.pgn"
