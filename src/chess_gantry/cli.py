@@ -1250,7 +1250,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                 if not args.configured_speed and not args.confirm_high_speed:
                     parser.error("fast replay-game requires --confirm-high-speed")
             if args.status:
-                replay_session.validate_session()
+                replay_session.validate_session(allow_motion_mismatch=True)
                 cursor = MirrorCursor.load(
                     replay_session.mirror.cursor_path, replay_session.game.replay_id
                 )
@@ -1281,7 +1281,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                     parser.error(
                         f"replay reconciliation requires --confirm-physical-state and exact confirmation: {RECOVERY_CONFIRMATION}"
                     )
-                replay_session.validate_session()
+                replay_session.validate_session(allow_motion_mismatch=True)
                 if args.mark_applied:
                     replay_session.mirror.service.reconcile_mark_applied()
                 else:

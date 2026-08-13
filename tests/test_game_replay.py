@@ -246,6 +246,7 @@ class ReplayTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ConfigurationError, "motion configuration"):
             resumed.run()
+        resumed.validate_session(allow_motion_mismatch=True)
 
     def test_saved_position_detection_distinguishes_fresh_and_resume(self) -> None:
         replay = self.replay("capture-checkmate.pgn")

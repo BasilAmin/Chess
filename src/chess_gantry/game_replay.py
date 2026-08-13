@@ -158,7 +158,9 @@ class GameReplay:
         canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
         return sha256(canonical).hexdigest()
 
-    def validate_session(self, *, create: bool = False) -> None:
+    def validate_session(
+        self, *, create: bool = False, allow_motion_mismatch: bool = False
+    ) -> None:
         expected = {
             "schema_version": 1,
             "replay_id": self.game.replay_id,
@@ -166,7 +168,18 @@ class GameReplay:
             "motion_config_sha256": self._motion_fingerprint(),
         }
         if self.metadata_path.exists():
-            if read_json(self.metadata_path) != expected:
+            actual = read_json(self.metadata_path)
+            identity_matches = (
+                actual.get("schema_version") == expected["schema_version"]
+                and actual.get("replay_id") == expected["replay_id"]
+                and actual.get("moves") == expected["moves"]
+            )
+            motion_matches = (
+                actual.get("motion_config_sha256") == expected["motion_config_sha256"]
+            )
+            if not identity_matches or (
+                not motion_matches and not allow_motion_mismatch
+            ):
                 raise ConfigurationError(
                     "replay session does not match this move list or motion configuration; "
                     "restore the previous configuration or reset from the standard position"
