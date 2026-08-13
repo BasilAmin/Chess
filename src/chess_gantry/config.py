@@ -384,6 +384,7 @@ class CaptureSettings:
     eject_points: Tuple[MachinePoint, ...]
     buffer_points: Tuple[MachinePoint, ...]
     magnetic_keepout_mm: float
+    planner_grid_step_mm: float
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "CaptureSettings":
@@ -396,6 +397,7 @@ class CaptureSettings:
                 "eject_points",
                 "buffer_points",
                 "magnetic_keepout_mm",
+                "planner_grid_step_mm",
             },
             "capture",
         )
@@ -460,6 +462,11 @@ class CaptureSettings:
             magnetic_keepout_mm=_number(
                 raw.get("magnetic_keepout_mm", 30.0),
                 "capture.magnetic_keepout_mm",
+                positive=True,
+            ),
+            planner_grid_step_mm=_number(
+                raw.get("planner_grid_step_mm", 15.0),
+                "capture.planner_grid_step_mm",
                 positive=True,
             ),
         )
@@ -651,6 +658,10 @@ class AppConfig:
             if self.capture.magnetic_keepout_mm >= self.board.square_size_mm:
                 raise ConfigurationError(
                     "capture.magnetic_keepout_mm must be smaller than one square"
+                )
+            if self.capture.planner_grid_step_mm > self.board.square_size_mm / 2:
+                raise ConfigurationError(
+                    "capture.planner_grid_step_mm must not exceed half a square"
                 )
 
         if self.magnet.on_commands == self.magnet.off_commands:

@@ -74,6 +74,10 @@ class ConfigAndGCodeTests(unittest.TestCase):
         raw["capture"]["magnetic_keepout_mm"] = 40.0
         with self.assertRaisesRegex(ConfigurationError, "smaller than one square"):
             AppConfig.from_mapping(raw)
+        raw = self.raw_config()
+        raw["capture"]["planner_grid_step_mm"] = 21.0
+        with self.assertRaisesRegex(ConfigurationError, "half a square"):
+            AppConfig.from_mapping(raw)
 
     def test_eject_and_buffer_points_must_be_outside_board_and_inside_workspace(
         self,

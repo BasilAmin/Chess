@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import time
 import json
 import unittest
 
@@ -34,6 +35,7 @@ def test_config(
                 "eject_points": [[0.0, 0.0], [0.0, 300.0]],
                 "buffer_points": [[10.0, 0.0], [10.0, 300.0]],
                 "magnetic_keepout_mm": 30.0,
+                "planner_grid_step_mm": 15.0,
             }
         else:
             raw["capture"]["mode"] = "slots"
@@ -413,6 +415,32 @@ class ServiceTests(unittest.TestCase):
                         service.config.capture.magnetic_keepout_mm,
                     )
                 )
+
+    def test_capture_planning_latency_stays_below_one_second(self) -> None:
+        with TemporaryDirectory() as directory:
+            temp = Path(directory)
+            state_path, journal_path, audit_path = self.paths(temp)
+            atomic_write_json(state_path, self.capture_state().to_dict())
+            service = GantryService(
+                test_config(capture=True, eject=True),
+                state_path,
+                journal_path,
+                audit_path,
+            )
+            move = MoveDelta.from_mapping(
+                {
+                    "position": "white_pawn_e",
+                    "px": 4,
+                    "py": 3,
+                    "nx": 3,
+                    "ny": 4,
+                    "capture": {"id": "black_pawn_d", "x": 3, "y": 4},
+                }
+            )
+            started = time.perf_counter()
+            service.plan_capture_ejection(move)
+            elapsed = time.perf_counter() - started
+            self.assertLess(elapsed, 1.5)
 
     def test_capture_ejection_forces_astar_when_normal_moves_are_direct(self) -> None:
         with TemporaryDirectory() as directory:

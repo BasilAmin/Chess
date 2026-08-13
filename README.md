@@ -25,10 +25,10 @@ flowchart LR
 ```
 
 > [!WARNING]
-> This system moves hardware and energizes an electromagnet. Keep an independent
-> physical cutoff within reach. Camera recognition and software validation do
-> not replace correct endstops, wiring, flyback protection, calibration, and a
-> clear workspace.
+> This software moves a real gantry and energizes an electromagnet. Keep an
+> independent physical cutoff within reach; verify wiring, flyback protection,
+> endstops, homing, calibration, workspace clearance, chutes, and collection tray
+> before execution. Software tests cannot certify mechanical safety.
 
 ## Current Capabilities
 
@@ -465,12 +465,103 @@ Board API game with an authorized `LICHESS_TOKEN`, use:
 ./scripts/mirror_lichess.sh GAME_ID --stream-mode board
 ```
 
-Captures are carried to the safest reachable edge chute and released beyond the playing
-area. En passant removes the pawn from its actual capture square. Castling uses
+If the terminal receives the move late, local path optimization cannot remove
+that upstream spectator delay. Board mode is the supported low-latency path for
+a game played by the authenticated account.
+
+Capture path planning previously took about two seconds on the development
+machine. Capture ejection now uses a dedicated 15 mm search grid with continuous
+30 mm segment-clearance verification; the same benchmark is about 0.26 seconds
+median. The planner still maximizes minimum clearance first and minimizes route
+length second. A completely enclosed captured piece fails before the magnet is
+energized rather than taking an unsafe route.
+
+Captures are carried to the safest reachable edge chute and released beyond the
+playing area. En passant removes the pawn from its actual capture square. Castling uses
 three persisted physical stages: rook to buffer, king to destination, rook from
 buffer to destination. Promotion keeps the pawn as the physical proxy while the
 virtual board tracks its promoted type. The cursor advances only after every
 physical stage completes.
+
+### Offline Game Replay
+
+Replay a saved standard-start PGN through simulated Marlin:
+
+```bash
+./scripts/replay_game.sh examples/replays/capture-checkmate.pgn \
+  --demo --no-screen
+```
+
+Replay it on the physical gantry:
+
+```bash
+./scripts/replay_game.sh examples/replays/capture-checkmate.pgn
+```
+
+The physical script requires the exact confirmation:
+
+```text
+REPLAY BOARD AND CHUTES READY
+```
+
+Replay uses the same move validation, persistent physical piece IDs, magnetic
+capture routing, en passant handling, castling buffer, promotion proxy, Marlin
+connection, homing, journal, and recovery logic as live mirroring. It accepts
+exactly one PGN, requires standard chess from the initial position, and rejects
+an invalid or non-standard game before opening the serial port.
+
+Included replay samples:
+
+| File                                       | Coverage                                                             |
+| ------------------------------------------ | -------------------------------------------------------------------- |
+| `examples/replays/capture-checkmate.pgn`   | Normal capture ending in checkmate                                   |
+| `examples/replays/en-passant-castling.pgn` | En passant, recapture, and kingside castling                         |
+| `examples/replays/capture-promotion.pgn`   | Multiple captures and capture-promotion pawn proxy                   |
+| `examples/replays/opera-game.pgn`          | Full 33-ply game, captures, queenside castling, sacrifices, and mate |
+
+Pause between plies:
+
+```bash
+./scripts/replay_game.sh examples/replays/en-passant-castling.pgn \
+  --demo --move-delay 1.5
+```
+
+Stop after a fixed number of additional plies, then resume with the same command:
+
+```bash
+uv run chess-gantry --config config.json replay-game \
+  examples/replays/en-passant-castling.pgn --demo --max-plies 5
+
+uv run chess-gantry --config config.json replay-game \
+  examples/replays/en-passant-castling.pgn --demo
+```
+
+Replay state is isolated by the PGN's canonical UCI hash under
+`data/chess-replay/REPLAY_ID/{physical,demo,simulation}/`. Re-running a completed
+session sends no duplicate moves and does not home. To physically replay it from the beginning,
+return every piece to the standard position and pass `--reset-session`.
+
+Inspect or reconcile an interrupted physical replay using the same PGN:
+
+```bash
+./scripts/replay_game.sh examples/replays/en-passant-castling.pgn --status
+
+./scripts/replay_game.sh examples/replays/en-passant-castling.pgn \
+  --mark-applied
+
+./scripts/replay_game.sh examples/replays/en-passant-castling.pgn \
+  --discard-pending
+```
+
+Reconciliation requires the exact confirmation
+`REPLAY PHYSICAL STATE VERIFIED`. Reset refuses to remove a pending transaction.
+
+Software validation cannot certify mechanical perfection. Before relying on a
+live game, run all three samples in `--demo`, then physically replay them at
+configured speed while observing chute clearance, magnet pickup/release, and
+castling buffer placement. The repository verifies legal/state/transaction/path
+behavior, but only a real gantry run can validate alignment, friction, magnet
+strength, tray geometry, and current firmware timing.
 
 ### Physical Claude Vs ChatGPT
 

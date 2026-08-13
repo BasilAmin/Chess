@@ -146,6 +146,7 @@ class GantryService:
         settings = replace(
             self.config.planner,
             kind="astar",
+            grid_step_mm=self.config.capture.planner_grid_step_mm,
             obstacle_keepout_mm=self.config.capture.magnetic_keepout_mm,
         )
         return safest_path_to_any_goal(

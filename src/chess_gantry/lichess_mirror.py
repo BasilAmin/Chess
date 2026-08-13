@@ -98,11 +98,17 @@ class MirrorCursor:
 
 class MirrorTerminal:
     def __init__(
-        self, output: TextIO = sys.stdout, *, screen: bool = True, unicode: bool = False
+        self,
+        output: TextIO = sys.stdout,
+        *,
+        screen: bool = True,
+        unicode: bool = False,
+        title: str = "Chess Gantry Lichess Mirror",
     ) -> None:
         self.output = output
         self.screen = screen and bool(getattr(output, "isatty", lambda: False)())
         self.unicode = unicode
+        self.title = title
 
     def render(
         self,
@@ -117,7 +123,7 @@ class MirrorTerminal:
             self.output.write("\x1b[2J\x1b[H")
         board_text = board.unicode(borders=True) if self.unicode else str(board)
         self.output.write(
-            f"Chess Gantry Lichess Mirror\n"
+            f"{self.title}\n"
             f"Game: {game_id}  State: {state}  Ply: {len(cursor.moves)}  "
             f"Revision: {cursor.physical_revision}\n"
             f"Turn: {'White' if board.turn else 'Black'}  Result: {cursor.result}\n\n"
@@ -161,9 +167,13 @@ class LichessMirror:
         client: Any = None,
         pgn_fetcher: Callable[..., str] = fetch_pgn,
         sleep: Callable[[float], None] = time.sleep,
+        directory: Optional[Path] = None,
     ) -> None:
-        if not game_id.isalnum() or not 8 <= len(game_id) <= 12:
-            raise ValidationError("Lichess game ID must be 8-12 letters or digits")
+        if directory is None:
+            if not game_id.isalnum() or not 8 <= len(game_id) <= 12:
+                raise ValidationError("Lichess game ID must be 8-12 letters or digits")
+        elif not game_id.isalnum() or not 8 <= len(game_id) <= 64:
+            raise ValidationError("session ID must be 8-64 letters or digits")
         if stream_mode not in {"auto", "public", "board"}:
             raise ValidationError("stream mode must be auto, public, or board")
         if not config.capture.buffer_points:
@@ -183,7 +193,9 @@ class LichessMirror:
         self.pgn_fetcher = pgn_fetcher
         self.sleep = sleep
         session_kind = "demo" if demo else "physical" if execute else "simulation"
-        self.directory = root / "data" / "lichess-mirror" / game_id / session_kind
+        self.directory = directory or (
+            root / "data" / "lichess-mirror" / game_id / session_kind
+        )
         self.cursor_path = self.directory / "cursor.json"
         self.state_path = self.directory / "board_state.json"
         self.journal_path = self.directory / "pending_move.json"

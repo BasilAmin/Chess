@@ -60,7 +60,8 @@
       [10.0, 0.0],
       [10.0, 300.0]
     ],
-    "magnetic_keepout_mm": 30.0
+    "magnetic_keepout_mm": 30.0,
+    "planner_grid_step_mm": 15.0
   },
   "safety": {
     "calibrated": true,

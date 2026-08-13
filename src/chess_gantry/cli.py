@@ -234,6 +234,65 @@ def _parser() -> ArgumentParser:
         default="public",
         help="public mirrors any public game; board requires a participant token",
     )
+    replay = commands.add_parser(
+        "replay-game",
+        help="replay one standard-start PGN through the same physical mirror pipeline",
+    )
+    replay.add_argument("pgn", help="path to one PGN game")
+    replay_mode = replay.add_mutually_exclusive_group()
+    replay_mode.add_argument(
+        "--execute", action="store_true", help="home and execute on the physical gantry"
+    )
+    replay_mode.add_argument(
+        "--demo", action="store_true", help="home and execute through simulated Marlin"
+    )
+    replay.add_argument(
+        "--configured-speed",
+        action="store_true",
+        help="use configured feeds instead of the fast 12000/3000 mm/min profile",
+    )
+    replay.add_argument(
+        "--move-delay",
+        type=float,
+        default=0.0,
+        help="seconds to pause between completed plies (default: 0)",
+    )
+    replay.add_argument(
+        "--max-plies",
+        type=int,
+        help="stop after this many additional plies; the session remains resumable",
+    )
+    replay.add_argument(
+        "--reset-session",
+        action="store_true",
+        help="discard this replay's cursor/state and start from the standard position",
+    )
+    replay_actions = replay.add_mutually_exclusive_group()
+    replay_actions.add_argument(
+        "--status", action="store_true", help="print replay cursor and physical state"
+    )
+    replay_actions.add_argument(
+        "--mark-applied",
+        action="store_true",
+        help="commit the pending replay transaction after physical verification",
+    )
+    replay_actions.add_argument(
+        "--discard-pending",
+        action="store_true",
+        help="discard the pending replay transaction after physical verification",
+    )
+    replay.add_argument(
+        "--confirm-physical-state",
+        action="store_true",
+        help="required for replay reconciliation actions",
+    )
+    replay.add_argument("--confirm-motion", action="store_true")
+    replay.add_argument("--confirm-standard-position", action="store_true")
+    replay.add_argument("--confirm-clear-path", action="store_true")
+    replay.add_argument("--confirm-capture-chutes", action="store_true")
+    replay.add_argument("--confirm-high-speed", action="store_true")
+    replay.add_argument("--unicode", action="store_true")
+    replay.add_argument("--no-screen", action="store_true")
     commands.add_parser("ports", help="list ranked serial ports visible to pyserial")
 
     diagnose = commands.add_parser(
@@ -1137,6 +1196,77 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                 ),
             )
             mirror_session.run(once=args.once)
+            return 0
+
+        if args.command == "replay-game":
+            from .game_replay import GameReplay
+            from .lichess_mirror import MirrorCursor, MirrorTerminal
+
+            if args.execute:
+                required = (
+                    (args.confirm_motion, "--confirm-motion"),
+                    (args.confirm_standard_position, "--confirm-standard-position"),
+                    (args.confirm_clear_path, "--confirm-clear-path"),
+                    (args.confirm_capture_chutes, "--confirm-capture-chutes"),
+                )
+                missing = [flag for confirmed, flag in required if not confirmed]
+                if missing:
+                    parser.error("physical replay-game requires " + ", ".join(missing))
+                if not args.configured_speed and not args.confirm_high_speed:
+                    parser.error("fast replay-game requires --confirm-high-speed")
+            action_on_physical_state = (
+                args.status or args.mark_applied or args.discard_pending
+            )
+            replay_session = GameReplay(
+                source=Path(args.pgn),
+                config=config,
+                root=Path.cwd(),
+                execute=args.execute or args.demo or action_on_physical_state,
+                demo=args.demo,
+                fast=not args.configured_speed,
+                move_delay_s=args.move_delay,
+                terminal=MirrorTerminal(
+                    screen=not args.no_screen,
+                    unicode=args.unicode,
+                    title="Chess Gantry Game Replay",
+                ),
+            )
+            if args.status:
+                cursor = MirrorCursor.load(
+                    replay_session.mirror.cursor_path, replay_session.game.replay_id
+                )
+                _print_json(
+                    {
+                        "cursor": {
+                            "moves": list(cursor.moves),
+                            "physical_revision": cursor.physical_revision,
+                            "pending_uci": cursor.pending_uci,
+                            "pending_completed": cursor.pending_completed,
+                            "pending_total": cursor.pending_total,
+                            "result": cursor.result,
+                        },
+                        "state": replay_session.mirror.service.store.load().to_dict(),
+                        "journal": (
+                            replay_session.mirror.service.journal.load()
+                            if replay_session.mirror.journal_path.exists()
+                            else None
+                        ),
+                    }
+                )
+                return 0
+            if args.mark_applied or args.discard_pending:
+                if not args.confirm_physical_state:
+                    parser.error(
+                        "replay reconciliation requires --confirm-physical-state"
+                    )
+                if args.mark_applied:
+                    replay_session.mirror.service.reconcile_mark_applied()
+                else:
+                    replay_session.mirror.service.reconcile_discard()
+                return 0
+            if args.reset_session:
+                replay_session.reset()
+            replay_session.run(max_plies=args.max_plies)
             return 0
 
         if args.command == "reconcile":

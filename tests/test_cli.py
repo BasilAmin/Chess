@@ -115,6 +115,28 @@ class RunCommandTests(unittest.TestCase):
         self.assertTrue(args.unicode)
         self.assertTrue(args.no_screen)
 
+    def test_replay_parser_exposes_resumable_physical_options(self) -> None:
+        from chess_gantry.cli import _parser
+
+        args = _parser().parse_args(
+            [
+                "replay-game",
+                "examples/replays/capture-checkmate.pgn",
+                "--demo",
+                "--move-delay",
+                "0.5",
+                "--max-plies",
+                "3",
+                "--reset-session",
+                "--no-screen",
+            ]
+        )
+        self.assertEqual(args.command, "replay-game")
+        self.assertTrue(args.demo)
+        self.assertEqual(args.move_delay, 0.5)
+        self.assertEqual(args.max_plies, 3)
+        self.assertTrue(args.reset_session)
+
     def test_web_defaults_to_unauthenticated_loopback(self) -> None:
         from chess_gantry.cli import _parser
 

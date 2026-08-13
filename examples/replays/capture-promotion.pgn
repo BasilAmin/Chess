@@ -1,0 +1,9 @@
+[Event "Capture Promotion"]
+[Site "Chess Gantry Replay"]
+[Date "2026.08.13"]
+[Round "1"]
+[White "Replay White"]
+[Black "Replay Black"]
+[Result "1-0"]
+
+1. a4 h5 2. a5 h4 3. a6 h3 4. axb7 hxg2 5. bxa8=Q 1-0
