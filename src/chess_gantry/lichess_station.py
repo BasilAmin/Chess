@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from threading import RLock, Thread
 from typing import Any, Callable, Optional
@@ -8,10 +9,11 @@ import time
 
 from .config import AppConfig
 from .errors import ConfigurationError, ValidationError
-from .lichess_mirror import LichessMirror, MirrorCursor, MirrorTerminal
+from .lichess_mirror import LichessMirror, MirrorCursor, MirrorTerminal, _game_snapshot
 from .lichess_open import OpenChallenge, create_open_challenge
 from .lichess_pgn import fetch_pgn, lichess_client
 from .persistence import atomic_write_json, read_json
+from .serial_link import DemoMarlinSerial, MarlinSerial
 
 
 STATION_CONFIRMATION = "STATION BOARD AND CHUTES READY"
@@ -85,7 +87,7 @@ class LichessStation:
             demo=self.demo,
             fast=True,
             stream_mode="public",
-            terminal=MirrorTerminal(title="Chess Gantry Lichess Station"),
+            terminal=MirrorTerminal(output=StringIO(), screen=False),
             client=self.client,
             pgn_fetcher=self.pgn_fetcher,
             sleep=self.sleep,
@@ -148,7 +150,28 @@ class LichessStation:
                 return
             self._state = "playing"
         try:
-            cursor = mirror.run()
+            cursor = mirror._initialize()
+            link_type = DemoMarlinSerial if self.demo else MarlinSerial
+            mirror.link = link_type(mirror.config.serial)
+            mirror.link.connect()
+            mirror.service.home_with_link(mirror.link)
+            while True:
+                with self._lock:
+                    if (
+                        not self._current(generation, mirror)
+                        or self._state == "stopped"
+                    ):
+                        return
+                snapshot, status, result = _game_snapshot(
+                    self.pgn_fetcher(challenge.game_id, token=None, client=self.client)
+                )
+                cursor = mirror._execute_remote_prefix(cursor, snapshot)
+                with self._lock:
+                    self._history = list(cursor.moves)
+                    self._result = result
+                if status == "finished":
+                    break
+                self.sleep(0.5)
             with self._lock:
                 if not self._current(generation, mirror):
                     return
@@ -160,6 +183,11 @@ class LichessStation:
                 if self._current(generation, mirror):
                     self._error = str(exc)
                     self._state = "failed"
+        finally:
+            if mirror.link is not None:
+                mirror.link.best_effort((*self.config.magnet.off_commands, "M211 S1"))
+                mirror.link.close()
+                mirror.link = None
 
     def _cursor(self) -> Optional[MirrorCursor]:
         mirror = self._mirror

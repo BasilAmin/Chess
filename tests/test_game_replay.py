@@ -96,12 +96,10 @@ class ReplayTests(unittest.TestCase):
             self.assertIsNotNone(piece)
             self.assertNotEqual(piece.piece_type, chess.KNIGHT)
             file_delta = abs(
-                chess.square_file(move.to_square)
-                - chess.square_file(move.from_square)
+                chess.square_file(move.to_square) - chess.square_file(move.from_square)
             )
             rank_delta = abs(
-                chess.square_rank(move.to_square)
-                - chess.square_rank(move.from_square)
+                chess.square_rank(move.to_square) - chess.square_rank(move.from_square)
             )
             if file_delta and rank_delta:
                 self.assertEqual(file_delta, rank_delta)

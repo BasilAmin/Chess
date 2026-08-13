@@ -520,13 +520,13 @@ an invalid or non-standard game before opening the serial port.
 
 Included replay samples:
 
-| File                                       | Coverage                                                                                   |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------ |
-| `examples/replays/capture-checkmate.pgn`   | Normal capture ending in checkmate                                                         |
-| `examples/replays/en-passant-castling.pgn` | En passant, recapture, and kingside castling                                               |
-| `examples/replays/capture-promotion.pgn`   | Multiple captures and capture-promotion pawn proxy                                         |
-| `examples/replays/opera-game.pgn`          | Full 33-ply game, captures, queenside castling, sacrifices, and mate                       |
-| `examples/replays/straight-pawns.pgn`      | 32 plies of straight pawn movement only; no knights, diagonals, captures, or special moves |
+| File                                          | Coverage                                                                                               |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `examples/replays/capture-checkmate.pgn`      | Normal capture ending in checkmate                                                                     |
+| `examples/replays/en-passant-castling.pgn`    | En passant, recapture, and kingside castling                                                           |
+| `examples/replays/capture-promotion.pgn`      | Multiple captures and capture-promotion pawn proxy                                                     |
+| `examples/replays/opera-game.pgn`             | Full 33-ply game, captures, queenside castling, sacrifices, and mate                                   |
+| `examples/replays/straight-pawns.pgn`         | 32 plies of straight pawn movement only; no knights, diagonals, captures, or special moves             |
 | `examples/replays/clear-lanes-no-knights.pgn` | Pawn, queen, bishop, and rook development with no knights; every diagonal has at least 30 mm clearance |
 
 Pause between plies:
@@ -581,21 +581,22 @@ strength, tray geometry, and current firmware timing.
 Station mode is the streamlined two-player workflow. The operator prepares the
 standard physical position and collection tray once, opens `/station`, and
 presses **Create game**. The page displays separate White and Black QR codes.
-Each player scans one code; after both seats join, the gantry homes automatically
-and the mobile boards become active.
+Each player scans one code and is sent directly to Lichess with a fixed color.
+Lichess pairs the first two scanners. The station detects the new public game,
+homes the gantry, and mirrors its complete move history.
 
 Run a LAN-accessible demo station:
 
 ```bash
 uv run chess-gantry --config config.demo.json web \
-  --demo --web-host 0.0.0.0 --allow-network
+  --demo --host 0.0.0.0 --allow-network
 ```
 
 Run the commissioned physical station:
 
 ```bash
 uv run chess-gantry --config config.json web \
-  --web-host 0.0.0.0 --allow-network
+  --host 0.0.0.0 --allow-network
 ```
 
 Open `http://STATION_LAN_IP:8000/station` on the operator display. Both phones
@@ -613,49 +614,48 @@ export CHESS_GANTRY_PUBLIC_URL=https://chess-station.example
 
 Station behavior:
 
-- no Lichess account or external game service is required;
-- no chess clock, idle timeout, game-duration timeout, or ply cutoff exists;
-- phones reconnect by reopening the same scanned seat URL;
-- repeated submissions include the expected ply and are idempotent, so retrying
-  after a lost HTTP response never repeats physical motion;
-- moves are accepted only for that seat, on its turn, from the server-generated
-  legal-move allowlist;
+- no API token or Lichess account is required to create or join the anonymous
+  open challenge;
+- the open challenge omits clock parameters, so Lichess creates an unlimited
+  correspondence game rather than a short timed game;
+- phones play on Lichess using the generated `urlWhite` and `urlBlack` links;
+- the former one-ply backlog abort is removed: every missing public move is
+  validated and mirrored in exact order, even when one stream update contains
+  many plies;
 - every move uses the persistent Marlin link and the same capture, en passant,
   castling, promotion-proxy, journal, and path-planning pipeline as mirroring;
 - checkmate, stalemate, automatic rule draws, resignation, operator stop, or a
   hardware failure ends the game and switches the magnet off;
-- either player can offer a draw; the other player's draw action accepts it;
-- **Leave game** awards the game to the opponent and releases the station for
-  the next group;
+- draw, resignation, and leaving are handled through the Lichess game page;
 - the operator QR/status routes remain behind the configured dashboard auth;
-- seat capabilities are random URL fragments, are removed from browser history,
-  never appear in HTTP request URLs, and are stored on disk only as SHA-256
-  hashes.
+- Lichess generates a new anonymous challenge ID and new fixed-color URLs for
+  every station game.
 
 After checkmate, draw, resignation, or leave, return all pieces to the standard
 physical position, replace any ejected or promotion-proxy pieces, keep the
-chutes clear, and press **Create next game**. New random seat tokens and QR codes
-are generated; old QR codes are rejected. The application cannot physically
+chutes clear, and press **Create next game**. A new Lichess challenge and QR pair
+are generated. The application cannot physically
 reset captured pieces, so this short operator reset is deliberately required
 between groups.
 
-If the station process restarts during an active game, it restores the latest
-cursor, move history, seat capabilities, and board state without moving. Verify
-that the physical board matches the saved position, type
-`STATION BOARD MATCHES SAVED STATE`, and press **Resume saved game**. If a move
-was interrupted, the operator panel instead shows **Physical recovery**. Inspect
-the board, type `STATION PHYSICAL STATE VERIFIED`, and mark whether the move
-completed. The service then homes, finishes only the missing sub-transfers, and
-continues with both phone sessions.
-
-Station state is bound to a fingerprint of board geometry, workspace, planner,
-magnet, capture, motion, and homing configuration. A changed configuration does
-not silently resume old physical coordinates.
+If a physical move is interrupted, the operator panel shows **Physical
+recovery**. Inspect the board, type `STATION PHYSICAL STATE VERIFIED`, and mark
+whether the move completed before resetting or starting another challenge.
 
 The server still retains finite per-command Marlin and network timeouts so a
 failed controller or dead connection cannot hang an actuator operation forever.
 Those are hardware fault boundaries, not game-duration limits; a healthy station
 game remains active until chess or an operator ends it.
+
+Token-free public mirroring is subject to Lichess spectator-stream delay. The
+station cannot bypass that upstream anti-cheating policy without participant
+OAuth. The local six-move/backlog shutdown is removed, so delayed batches are
+now caught up instead of stopping the gantry.
+
+Board moves now use `M106 P0 S160` to reduce attraction to neighboring pieces.
+Capture ejection retains `M106 P0 S255` for a secure long carry. These values
+must be physically validated with the heaviest piece; increase only
+`magnet.move_on_commands` if `S160` does not hold reliably.
 
 ### Physical Claude Vs ChatGPT
 

@@ -47,22 +47,25 @@ class LichessStationTests(unittest.TestCase):
             "https://lichess.org/game1234?color=black",
             "https://lichess.org/game1234",
         )
-        client = FakeClient(
-            [{"type": "gameState", "moves": " ".join(moves), "status": "mate"}]
-        )
+        client = FakeClient([])
         station = LichessStation(
             self.root,
             self.config,
             demo=True,
             challenge_factory=lambda **kwargs: challenge,
             client=client,
-            pgn_fetcher=lambda *args, **kwargs: pgn(),
+            pgn_fetcher=lambda *args, **kwargs: pgn(moves, result="1-0"),
             sleep=lambda value: None,
         )
-        created = station.create(base_url="http://unused", confirmation=STATION_CONFIRMATION)
+        created = station.create(
+            base_url="http://unused", confirmation=STATION_CONFIRMATION
+        )
         self.assertEqual(created["join_urls"]["white"], challenge.white_url)
         deadline = time.monotonic() + 5
-        while station.admin_status()["state"] not in {"finished", "failed"} and time.monotonic() < deadline:
+        while (
+            station.admin_status()["state"] not in {"finished", "failed"}
+            and time.monotonic() < deadline
+        ):
             time.sleep(0.01)
         status = station.admin_status()
         self.assertEqual(status["state"], "finished")
