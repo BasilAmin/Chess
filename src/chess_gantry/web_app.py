@@ -45,6 +45,10 @@ def web_bind_error(host: str, port: int, exc: OSError) -> ValidationError:
 
 def station_public_url(host: str, port: int) -> str:
     configured = os.environ.get("CHESS_GANTRY_PUBLIC_URL", "").strip().rstrip("/")
+    if not configured:
+        public_host = os.environ.get("CHESS_GANTRY_PUBLIC_HOST", "").strip()
+        if public_host:
+            configured = f"http://{public_host}"
     if configured:
         parsed = urlsplit(configured)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -189,6 +193,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             "/api/station/state",
             "/api/station/move",
             "/api/station/resign",
+            "/api/station/leave",
+            "/api/station/draw",
         }
 
     def _analysis_board(self) -> Any:
@@ -378,10 +384,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                 result = self._station().player_status(str(payload.get("token", "")))
             elif parsed.path == "/api/station/move":
                 result = self._station().move(
-                    str(payload.get("token", "")), str(payload.get("uci", ""))
+                    str(payload.get("token", "")),
+                    str(payload.get("uci", "")),
+                    expected_ply=(
+                        int(payload["expected_ply"])
+                        if payload.get("expected_ply") is not None
+                        else None
+                    ),
                 )
             elif parsed.path == "/api/station/resign":
                 result = self._station().resign(str(payload.get("token", "")))
+            elif parsed.path == "/api/station/leave":
+                result = self._station().leave(str(payload.get("token", "")))
+            elif parsed.path == "/api/station/draw":
+                result = self._station().offer_draw(str(payload.get("token", "")))
             elif parsed.path == "/api/station/create":
                 if self._game().running() or self._arena().running():
                     raise ConfigurationError(
@@ -406,6 +422,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
             elif parsed.path == "/api/station/stop":
                 result = self._station().stop()
+            elif parsed.path == "/api/station/resume":
+                result = self._station().resume(str(payload.get("confirmation", "")))
             elif parsed.path == "/api/station/reconcile/apply":
                 result = self._station().reconcile(
                     applied=True,

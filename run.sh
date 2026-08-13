@@ -187,6 +187,7 @@ RUN_ARGS=(
   --volume "$ROOT/config.json:/app/config.json:ro"
   --volume "$ROOT/data:/app/data"
   --env "CHESS_GANTRY_PUBLIC_HOST=$MDNS_NAME"
+  --env "CHESS_GANTRY_PUBLIC_URL=http://$MDNS_NAME"
   --env "CHESS_GANTRY_WEB_HOST=0.0.0.0"
   --env "CHESS_GANTRY_WEB_PORT=$APP_PORT"
   --env "CHESS_GANTRY_DISTROLESS=1"

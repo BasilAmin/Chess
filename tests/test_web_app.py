@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 
@@ -26,6 +27,7 @@ from chess_gantry.web_app import (
     RequestHandler,
     web_clerk_settings,
     web_bind_error,
+    station_public_url,
 )
 
 
@@ -344,6 +346,14 @@ class WebSecurityModeTests(unittest.TestCase):
                 service.store.initialize(BoardState.standard(), overwrite=True)
             self.assertEqual(service.store.load().revision, 0)
 
+    def test_station_public_url_prefers_explicit_origin(self):
+        with mock.patch.dict(
+            "os.environ", {"CHESS_GANTRY_PUBLIC_URL": "https://station.example"}
+        ):
+            self.assertEqual(
+                station_public_url("0.0.0.0", 8000), "https://station.example"
+            )
+
 
 class WebAppTests(unittest.TestCase):
     def setUp(self):
@@ -428,7 +438,9 @@ class WebAppTests(unittest.TestCase):
     def test_station_pages_qr_join_and_moves_work_without_authentication(self):
         with urllib.request.urlopen(self.base + "/station") as response:
             station_html = response.read().decode()
-        self.assertIn("Scan. Sit. Play.", station_html)
+        self.assertIn("Two-player station game", station_html)
+        self.assertNotIn("gradient", station_html)
+        self.assertNotIn("border-radius:18px", station_html)
         with urllib.request.urlopen(self.base + "/station/play") as response:
             player_html = response.read().decode()
         self.assertIn("Connecting to station", player_html)
@@ -453,10 +465,20 @@ class WebAppTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual(status["result"]["state"], "playing")
         _, moved = self.request(
-            "/api/station/move", {"token": tokens["white"], "uci": "e2e4"}
+            "/api/station/move",
+            {"token": tokens["white"], "uci": "e2e4", "expected_ply": 0},
         )
         self.assertEqual(moved["result"]["turn"], "black")
         self.assertIsNone(moved["result"]["expires_at"])
+        _, left = self.request("/api/station/leave", {"token": tokens["white"]})
+        self.assertEqual(left["result"]["state"], "finished")
+        _, next_game = self.request(
+            "/api/station/create",
+            {"confirmation": STATION_CONFIRMATION, "base_url": "ignored"},
+        )
+        self.assertNotEqual(
+            next_game["result"]["game_id"], created["result"]["game_id"]
+        )
 
     def test_every_javascript_dom_reference_exists_in_dashboard(self):
         ids = set(re.findall(r'id="([A-Za-z][A-Za-z0-9_-]*)"', HTML))
