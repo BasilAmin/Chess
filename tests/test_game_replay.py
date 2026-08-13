@@ -49,6 +49,7 @@ class ReplayTests(unittest.TestCase):
             "en-passant-castling.pgn": (11, "1-0"),
             "capture-promotion.pgn": (9, "1-0"),
             "opera-game.pgn": (33, "1-0"),
+            "straight-pawns.pgn": (32, "1/2-1/2"),
         }
         for name, (plies, result) in expected.items():
             with self.subTest(name=name):
@@ -58,6 +59,24 @@ class ReplayTests(unittest.TestCase):
                 self.assertEqual(first.result, result)
                 self.assertEqual(first.replay_id, second.replay_id)
                 self.assertRegex(first.replay_id, r"^rp[0-9a-f]{24}$")
+
+    def test_straight_pawn_sample_has_no_knights_or_diagonal_moves(self) -> None:
+        import chess
+
+        game = load_replay_game(SAMPLES / "straight-pawns.pgn")
+        board = chess.Board()
+        for uci in game.moves:
+            move = chess.Move.from_uci(uci)
+            piece = board.piece_at(move.from_square)
+            self.assertIsNotNone(piece)
+            self.assertNotEqual(piece.piece_type, chess.KNIGHT)
+            from_file = chess.square_file(move.from_square)
+            to_file = chess.square_file(move.to_square)
+            from_rank = chess.square_rank(move.from_square)
+            to_rank = chess.square_rank(move.to_square)
+            self.assertTrue(from_file == to_file or from_rank == to_rank)
+            self.assertFalse(board.is_capture(move))
+            board.push(move)
 
     def test_result_metadata_does_not_split_identical_physical_replay(self) -> None:
         first = self.root / "first.pgn"

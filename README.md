@@ -520,12 +520,13 @@ an invalid or non-standard game before opening the serial port.
 
 Included replay samples:
 
-| File                                       | Coverage                                                             |
-| ------------------------------------------ | -------------------------------------------------------------------- |
-| `examples/replays/capture-checkmate.pgn`   | Normal capture ending in checkmate                                   |
-| `examples/replays/en-passant-castling.pgn` | En passant, recapture, and kingside castling                         |
-| `examples/replays/capture-promotion.pgn`   | Multiple captures and capture-promotion pawn proxy                   |
-| `examples/replays/opera-game.pgn`          | Full 33-ply game, captures, queenside castling, sacrifices, and mate |
+| File                                       | Coverage                                                                                   |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `examples/replays/capture-checkmate.pgn`   | Normal capture ending in checkmate                                                         |
+| `examples/replays/en-passant-castling.pgn` | En passant, recapture, and kingside castling                                               |
+| `examples/replays/capture-promotion.pgn`   | Multiple captures and capture-promotion pawn proxy                                         |
+| `examples/replays/opera-game.pgn`          | Full 33-ply game, captures, queenside castling, sacrifices, and mate                       |
+| `examples/replays/straight-pawns.pgn`      | 32 plies of straight pawn movement only; no knights, diagonals, captures, or special moves |
 
 Pause between plies:
 
