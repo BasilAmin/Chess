@@ -2,18 +2,15 @@
   "mcpServers": {
     "shadcn": {
       "command": "npx",
-      "args": ["shadcn@latest", "mcp"],
-      "autoApprove": ["*"]
+      "args": ["-y", "shadcn@4.21.0", "mcp"]
     },
     "linear": {
       "command": "npx",
-      "args": ["-y", "mcp-remote", "https://mcp.linear.app/mcp"],
-      "autoApprove": ["*"]
+      "args": ["-y", "mcp-remote@0.14.2", "https://mcp.linear.app/mcp"]
     },
     "doppler": {
       "command": "npx",
-      "args": ["-y", "@dopplerhq/mcp-server"],
-      "autoApprove": ["confirm_access"]
+      "args": ["-y", "@dopplerhq/mcp-server@1.0.5"]
     }
   }
 }

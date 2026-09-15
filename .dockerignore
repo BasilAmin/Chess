@@ -16,7 +16,5 @@ __pycache__
 *.tmp
 *.gcode
 *.json.lock
-chicken/.git
-chicken/.pio
 firmware/*.elf
 firmware/*.map

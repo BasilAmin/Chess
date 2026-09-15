@@ -73,8 +73,8 @@ class DockerConfigurationTests(unittest.TestCase):
         self.assertIn('"${DOCKER[@]}" run --rm', script)
 
     def test_config_serial_path_matches_container_device(self) -> None:
-        config = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
-        self.assertEqual(config["serial"]["port"], "/dev/ttyUSB0")
+        config = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
+        self.assertEqual(config["serial"]["port"], "auto")
 
     def test_run_script_has_no_reed_or_i2c_runtime(self) -> None:
         script = (ROOT / "run.sh").read_text(encoding="utf-8")
@@ -116,7 +116,7 @@ class DockerConfigurationTests(unittest.TestCase):
 
     def test_dockerignore_excludes_large_local_directories(self) -> None:
         ignored = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
-        for value in (".git", ".venv", "node_modules", "data", "chicken/.pio"):
+        for value in (".git", ".venv", "node_modules", "data"):
             self.assertIn(value, ignored)
 
 

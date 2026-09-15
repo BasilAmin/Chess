@@ -1,6 +1,6 @@
 {
   "serial": {
-    "port": "/dev/ttyUSB0",
+    "port": "auto",
     "baudrate": 115200,
     "fallback_baudrates": [115200, 250000],
     "read_timeout_s": 0.25,
@@ -27,9 +27,9 @@
     "max_y_mm": 300.0
   },
   "motion": {
-    "travel_feed_mm_min": 12000.0,
-    "drag_feed_mm_min": 3000.0,
-    "capture_drag_feed_mm_min": 12000.0,
+    "travel_feed_mm_min": 3000.0,
+    "drag_feed_mm_min": 600.0,
+    "capture_drag_feed_mm_min": 3000.0,
     "magnet_on_dwell_ms": 300,
     "magnet_off_dwell_ms": 300,
     "park_after_move": true,
@@ -66,8 +66,8 @@
     "planner_grid_step_mm": 15.0
   },
   "safety": {
-    "calibrated": true,
-    "home_before_execute": false,
+    "calibrated": false,
+    "home_before_execute": true,
     "home_commands": ["G28 X Y Z", "M400", "G92 X2 Y298 Z328", "M400"],
     "preflight_commands": ["M115"],
     "emergency_stop_command": "M112"

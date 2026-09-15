@@ -48,7 +48,7 @@ class SetupCoordinatorTests(unittest.TestCase):
     def setUp(self):
         self.temporary = TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        raw = json.loads((ROOT / "config.json").read_text())
+        raw = json.loads((ROOT / "config.example.json").read_text())
         raw["planner"]["kind"] = "direct"
         self.config = AppConfig.from_mapping(raw)
         state = self.root / "state.json"

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
-from threading import RLock, Thread
+from threading import RLock, Thread, current_thread
 from typing import Any, Callable, Optional
 import time
 
@@ -60,6 +60,7 @@ class LichessStation:
         self._history: list[str] = []
         self._network_error: Optional[str] = None
         self._retry_delay_s = POLL_INTERVAL_S
+        self._worker: Optional[Thread] = None
 
     def active(self) -> bool:
         with self._lock:
@@ -122,11 +123,14 @@ class LichessStation:
                     "state": self._state,
                 },
             )
-        Thread(
+        worker = Thread(
             target=self._run_game,
             args=(generation, mirror, station_challenge),
             daemon=True,
-        ).start()
+        )
+        with self._lock:
+            self._worker = worker
+        worker.start()
         return self.admin_status()
 
     def _current(self, generation: int, mirror: LichessMirror) -> bool:
@@ -265,7 +269,10 @@ class LichessStation:
                 raise ConfigurationError("there is no station game")
             self._generation += 1
             mirror = self._mirror
+            worker = self._worker
             self._state = "stopped"
+        if worker is not None and worker is not current_thread():
+            worker.join(timeout=5.0)
         if mirror is not None and mirror.link is not None:
             try:
                 mirror.link.emergency_stop(self.config.safety.emergency_stop_command)

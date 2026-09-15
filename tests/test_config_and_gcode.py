@@ -18,8 +18,8 @@ class ConfigAndGCodeTests(unittest.TestCase):
 
     def test_example_config_drives_creality_fan_zero(self) -> None:
         config = AppConfig.from_mapping(self.raw_config())
-        self.assertTrue(config.safety.calibrated)
-        self.assertFalse(config.safety.home_before_execute)
+        self.assertFalse(config.safety.calibrated)
+        self.assertTrue(config.safety.home_before_execute)
         self.assertEqual(config.magnet.on_commands, ("M106 P0 S255",))
         self.assertEqual(config.magnet.move_on_commands, ("M106 P0 S100",))
         self.assertEqual(config.magnet.capture_on_commands, ("M106 P0 S255",))
@@ -119,9 +119,9 @@ class ConfigAndGCodeTests(unittest.TestCase):
         on_index = commands.index("M106 P0 S100")
         self.assertNotIn("M82", commands)
         self.assertFalse(any(command.startswith("M302") for command in commands))
-        self.assertIn("G0 X290 Y10 Z10 F12000", commands)
-        first_drag = commands.index("G1 X285 Y15 Z20 F3000")
-        final_drag = commands.index("G1 X270 Y30 Z30 F3000")
+        self.assertIn("G0 X290 Y10 Z10 F3000", commands)
+        first_drag = commands.index("G1 X285 Y15 Z20 F600")
+        final_drag = commands.index("G1 X270 Y30 Z30 F600")
         off_after_drag = next(
             index
             for index in range(final_drag + 1, len(commands))

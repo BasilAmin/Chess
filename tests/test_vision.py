@@ -202,7 +202,9 @@ class VisionTests(unittest.TestCase):
 
         config = AppConfig.from_mapping(
             json.loads(
-                (Path(__file__).resolve().parents[1] / "config.json").read_text()
+                (
+                    Path(__file__).resolve().parents[1] / "config.example.json"
+                ).read_text()
             )
         )
         payload = {
