@@ -85,6 +85,11 @@ firmware policy, the Sol schema, legal move inference, game routing, echo
 suppression, remote physical planning, and the web API without making paid OpenAI
 calls or moving real hardware.
 
+`config.json` is intentionally ignored because it contains machine calibration. Copy
+`config.example.json` to `config.json`, calibrate the machine, and only then set
+`safety.calibrated` to `true`. The repository includes a checksum-verified prebuilt
+firmware image; its customized Marlin source is not distributed here.
+
 ## Phone Camera
 
 The configured phone is:
@@ -916,7 +921,7 @@ Install on a 64-bit Pi:
 ```bash
 sudo apt update
 sudo apt install -y git curl
-git clone --recurse-submodules https://github.com/odinglyn0/Chess.git
+git clone https://github.com/BasilAmin/Chess.git
 cd Chess
 ./scripts/install_pi.sh
 ```

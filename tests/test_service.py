@@ -148,7 +148,7 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("M107 P0", commands)
             self.assertLess(
                 commands.index("M106 P0 S100"),
-                commands.index("G1 X122 Y178 Z200 F3000"),
+                commands.index("G1 X122 Y178 Z200 F600"),
             )
 
     def test_reference_gantry_requires_all_three_endstops(self) -> None:

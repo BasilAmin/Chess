@@ -1,6 +1,5 @@
 # Dependencies / build artifacts
 node_modules/
-chicken/
 .venv/
 build/
 dist/

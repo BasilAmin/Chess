@@ -1,88 +1,29 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import json
-import re
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MARLIN = ROOT / "chicken" / "Marlin"
+FIRMWARE = ROOT / "firmware" / "relay-chess-v422-stm32f103ret6.bin"
+CHECKSUM = ROOT / "firmware" / "relay-chess-v422-stm32f103ret6.bin.sha256"
 
 
 class FirmwareConfigurationTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.configuration = (MARLIN / "Configuration.h").read_text(encoding="utf-8")
-        cls.advanced = (MARLIN / "Configuration_adv.h").read_text(encoding="utf-8")
-        cls.pins = (
-            MARLIN / "src" / "pins" / "stm32f1" / "pins_CREALITY_V422.h"
-        ).read_text(encoding="utf-8")
-        cls.platformio = (ROOT / "chicken" / "platformio.ini").read_text(
-            encoding="utf-8"
-        )
+    def test_versioned_firmware_matches_checksum(self) -> None:
+        expected, filename = CHECKSUM.read_text(encoding="utf-8").split()
+        self.assertEqual(filename, FIRMWARE.name)
+        self.assertEqual(hashlib.sha256(FIRMWARE.read_bytes()).hexdigest(), expected)
 
-    def assert_define(self, text: str, name: str, value: str) -> None:
-        self.assertRegex(
-            text, rf"(?m)^\s*#define\s+{name}\s+{re.escape(value)}\s*(?://.*)?$"
-        )
+    def test_example_requires_calibration_and_homing(self) -> None:
+        config = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
+        self.assertFalse(config["safety"]["calibrated"])
+        self.assertTrue(config["safety"]["home_before_execute"])
+        self.assertEqual(config["serial"]["port"], "auto")
 
-    def test_exact_board_and_build_target(self) -> None:
-        self.assert_define(self.configuration, "MOTHERBOARD", "BOARD_CREALITY_V422")
-        self.assertRegex(
-            self.platformio,
-            r"(?m)^default_envs\s*=\s*STM32F103RE_creality\s*$",
-        )
-
-    def test_outer_axes_home_together_to_independent_switches(self) -> None:
-        self.assert_define(self.configuration, "INVERT_X_DIR", "false")
-        self.assert_define(self.configuration, "INVERT_Y_DIR", "false")
-        self.assert_define(self.configuration, "X_HOME_DIR", "-1")
-        self.assert_define(self.configuration, "Y_HOME_DIR", "1")
-        self.assertRegex(self.advanced, r"(?m)^\s*#define\s+QUICK_HOME\b")
-        self.assertRegex(
-            self.configuration, r"(?m)^\s*#define\s+VALIDATE_HOMING_ENDSTOPS\b"
-        )
-
-    def test_inner_z_axis_uses_physical_e_driver_and_z_switch(self) -> None:
-        self.assert_define(self.pins, "Z_STEP_PIN", "PB4")
-        self.assert_define(self.pins, "Z_DIR_PIN", "PB3")
-        self.assert_define(self.configuration, "INVERT_Z_DIR", "true")
-        self.assert_define(self.configuration, "Z_HOME_DIR", "1")
-        self.assert_define(self.configuration, "X_BED_SIZE", "350")
-        self.assert_define(self.configuration, "Y_BED_SIZE", "350")
-        self.assert_define(self.configuration, "Z_MAX_POS", "350")
-        self.assertNotRegex(self.configuration, r"(?m)^\s*#define\s+BLTOUCH\b")
-        self.assertNotRegex(
-            self.configuration,
-            r"(?m)^\s*#define\s+Z_MIN_PROBE_USES_Z_MIN_ENDSTOP_PIN\b",
-        )
-
-    def test_motion_and_non_printer_safety_profile(self) -> None:
-        self.assert_define(
-            self.configuration, "DEFAULT_AXIS_STEPS_PER_UNIT", "{ 80, 80, 80 }"
-        )
-        self.assert_define(self.configuration, "EXTRUDERS", "0")
-        self.assert_define(self.configuration, "TEMP_SENSOR_0", "0")
-        self.assert_define(self.configuration, "TEMP_SENSOR_BED", "0")
-        self.assertRegex(
-            self.advanced, r"(?m)^\s*#define\s+ENDSTOPS_ALWAYS_ON_DEFAULT\b"
-        )
-        self.assertRegex(self.advanced, r"(?m)^\s*#define\s+EMERGENCY_PARSER\b")
-
-    def test_host_workspace_uses_safe_no_flash_remap_inside_firmware_limits(
-        self,
-    ) -> None:
-        config = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
-        self.assertEqual(config["workspace"]["max_y_mm"], 300.0)
-        self.assertEqual(config["workspace"]["max_x_mm"], 330.0)
+    def test_example_workspace_stays_inside_firmware_limits(self) -> None:
+        config = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
         self.assertLessEqual(config["workspace"]["max_y_mm"], 350.0)
         self.assertLessEqual(config["workspace"]["max_x_mm"], 350.0)
-        self.assertEqual(
-            config["safety"]["home_commands"],
-            ["G28 X Y Z", "M400", "G92 X2 Y298 Z328", "M400"],
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()

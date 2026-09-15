@@ -47,7 +47,6 @@ extend-exclude = '''
   \.kilo
   | \.venv
   | build
-  | chicken
   | dist
   | data
 )/

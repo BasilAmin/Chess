@@ -5,82 +5,30 @@ on:
   push:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: format-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   check:
     name: Check formatting
-    if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-
       - run: npm ci
-
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-
       - name: Install Python
         run: uv python install 3.11
-
       - name: Prettier (check)
         run: node node_modules/prettier/bin/prettier.cjs --check .
-
       - name: Black (check)
         run: uvx black@25.9.0 --check .
-
       - name: Comments and docstrings (check)
         run: uv run --no-project python scripts/strip_comments.py --check src tests examples scripts
-
-  fix:
-    name: Apply formatting and commit back
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - run: npm ci
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Install Python
-        run: uv python install 3.11
-
-      - name: Strip comments and docstrings
-        run: uv run --no-project python scripts/strip_comments.py --write src tests examples scripts
-
-      - name: Prettier (write)
-        run: node node_modules/prettier/bin/prettier.cjs --write .
-
-      - name: Black (write)
-        run: uvx black@25.9.0 .
-
-      - name: Commit and push formatting changes
-        run: |
-          if [ -z "$(git status --porcelain)" ]; then
-            echo "No formatting changes to commit."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "style: apply automated formatting [skip ci]"
-          git push origin HEAD:main
